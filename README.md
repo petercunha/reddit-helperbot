@@ -23,7 +23,7 @@ Follow these steps to get HelperBot up and running:
     If you haven't already, download or clone this repository to your local machine.
 
     ```bash
-    git clone <repository_url>
+    git clone https://github.com/petercunha/reddit-helperbot.git
     cd reddit-helperbot
     ```
 
