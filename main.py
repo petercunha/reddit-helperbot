@@ -69,7 +69,7 @@ reddit = praw.Reddit(
 # ──────────────────────────────────────────────────────────────────────────
 # 4. Bot settings
 # ──────────────────────────────────────────────────────────────────────────
-TRIGGER = re.compile(r"^\s*(?:u/|@)grok\b", re.I)   # only "u/grok" or "@grok" trigger
+TRIGGER = re.compile(r"^\s*(?:\[?u/|@)grok\b", re.I)   # matches "u/grok", "[u/grok", or "@grok"
 SUBS    = ["all"]                             # listen everywhere; tune as needed
 REDDIT_RATE_LIMIT_SEC = 10                     # courtesy delay after replying
 
@@ -157,12 +157,13 @@ def main() -> None:
     for comment in reddit.subreddit("+".join(SUBS)).stream.comments(skip_existing=True):
         with stats_lock:
             comments_read += 1
-        try:
-            # Ignore our own comments
-            if comment.author == reddit.user.me():
-                continue
 
-            # Check trigger
+        # Print out any comment that contains "grok" (case-insensitive)
+        if "grok" in comment.body.lower():
+            print(f"[INFO] Comment contains 'grok': {comment.body}")
+
+        try:
+            # Only respond to comments that match the trigger
             if not TRIGGER.match(comment.body):
                 continue
 
