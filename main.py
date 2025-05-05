@@ -69,7 +69,7 @@ reddit = praw.Reddit(
 # ──────────────────────────────────────────────────────────────────────────
 # 4. Bot settings
 # ──────────────────────────────────────────────────────────────────────────
-TRIGGER = re.compile(r"^\s*(?:\[?u/|@)grok\b", re.I)   # matches "u/grok", "[u/grok", or "@grok"
+TRIGGER = re.compile(r"^\s*(?:\[?u/|@)(?:grok|ai|gemini|chatgpt)\b", re.I)   # matches u/grok, u/ai, u/gemini, u/chatgpt, and the corresponding @ mentions
 SUBS    = ["all"]                             # listen everywhere; tune as needed
 REDDIT_RATE_LIMIT_SEC = 10                     # courtesy delay after replying
 
