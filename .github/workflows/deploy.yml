@@ -27,3 +27,4 @@ jobs:
           docker build -t reddit-helperbot .
           docker run -d --restart=always --name reddit-helperbot reddit-helperbot
           EOF
+
