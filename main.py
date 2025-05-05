@@ -74,7 +74,7 @@ SUBS    = ["all"]                             # listen everywhere; tune as neede
 REDDIT_RATE_LIMIT_SEC = 10                     # courtesy delay after replying
 
 # context‑window guard
-MAX_CHARS = 10_000    # rough safety cap for prompt length
+MAX_CHARS = 40_000    # rough safety cap for prompt length
 INDENT    = "> "      # quote indent used in transcript
 
 
