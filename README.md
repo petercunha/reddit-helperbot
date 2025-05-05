@@ -1,6 +1,6 @@
 # HelperBot
 
-HelperBot is a Python-based Reddit bot that listens for specific words in comments. When activated, it reads the conversation thread, sends it to an AI model via OpenRouter, and posts the AI's response back to Reddit.
+HelperBot is a Python-based Reddit bot that listens for specific words in comments (like `@AI`). When activated, it reads the conversation thread, sends it to an AI model via OpenRouter, and posts the AI's response back to Reddit.
 
 ## ✨ Features
 
