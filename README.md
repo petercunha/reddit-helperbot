@@ -1,10 +1,10 @@
 # HelperBot
 
-HelperBot is a Python-based Reddit bot that listens for specific words in comments (like `grok`, `gwok`, or `gork`). When activated, it reads the conversation thread, sends it to an AI model via OpenRouter, and posts the AI's response back to Reddit.
+HelperBot is a Python-based Reddit bot that listens for specific words in comments. When activated, it reads the conversation thread, sends it to an AI model via OpenRouter, and posts the AI's response back to Reddit.
 
 ## ✨ Features
 
-- Listens for comments starting with `u/grok`, `@grok`, `grok`, `gwok`, or `gork` (case-insensitive).
+- Listens for comments starting with `@ai`, `@chatgpt`, `@gemini`, or `@grok` (case-insensitive).
 - Fetches the entire conversation context (submission + comments).
 - Uses OpenRouter to connect to various Large Language Models (LLMs).
 - Posts the LLM's generated reply back to the comment.
