@@ -22,9 +22,8 @@ jobs:
           ssh -o StrictHostKeyChecking=no ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} <<'EOF'
           cd /home/peter/apps/reddit-helperbot
           git pull origin main
-          docker stop reddit-helperbot || true
-          docker rm reddit-helperbot || true
-          docker build -t reddit-helperbot .
-          docker run -d --restart=always --name reddit-helperbot reddit-helperbot
+          docker stop helperbot || true
+          docker rm helperbot || true
+          docker build -t helperbot .
+          docker run -d --restart=always --name helperbot helperbot
           EOF
-

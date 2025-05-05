@@ -158,10 +158,6 @@ def main() -> None:
         with stats_lock:
             comments_read += 1
 
-        # Print out any comment that contains "grok" (case-insensitive)
-        if "grok" in comment.body.lower():
-            print(f"[INFO] Comment contains 'grok': {comment.body}")
-
         try:
             # Only respond to comments that match the trigger
             if not TRIGGER.match(comment.body):
