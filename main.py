@@ -53,7 +53,7 @@ client = OpenAI(
         "X-Title": "helperbot",
     },
 )
-MODEL = "google/gemini-2.5-pro-exp-03-25"  # pick any model on OpenRouter
+MODEL = "google/gemini-2.5-pro-preview"  # pick any model on OpenRouter
 
 # ──────────────────────────────────────────────────────────────────────────
 # 3. Reddit client
@@ -77,21 +77,66 @@ REDDIT_RATE_LIMIT_SEC = 10                     # courtesy delay after replying
 MAX_CHARS = 40_000    # rough safety cap for prompt length
 INDENT    = "> "      # quote indent used in transcript
 
+# Maximum number of images to send to the LLM
+MAX_IMAGES_TO_SEND = 5
+
+# Regex patterns for extracting image URLs
+IMAGE_URL_DIRECT_PATTERN = re.compile(r"https?://\S+\.(?:png|jpg|jpeg|gif|webp|bmp)", re.IGNORECASE)
+MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[.*?\]\((https?://\S+\.(?:png|jpg|jpeg|gif|webp|bmp))\)", re.IGNORECASE)
+
+def extract_image_urls_from_text(text: str) -> list[str]:
+    """Extracts direct image URLs and Markdown image links from text."""
+    urls = []
+    if not text: # Ensure text is not None or empty
+        return urls
+    # Find direct URLs
+    for match in IMAGE_URL_DIRECT_PATTERN.finditer(text):
+        urls.append(match.group(0))
+    # Find Markdown image links
+    for match in MARKDOWN_IMAGE_PATTERN.finditer(text):
+        urls.append(match.group(1))
+    # Remove duplicates while preserving order
+    return list(dict.fromkeys(urls))
 
 # ──────────────────────────────────────────────────────────────────────────
 # 5. Build a transcript: submission + ancestor comments
 # ──────────────────────────────────────────────────────────────────────────
-def build_thread_transcript(trigger_comment: praw.models.Comment) -> str:
+def build_thread_transcript(trigger_comment: praw.models.Comment) -> tuple[str, list[str]]:
     """
     Return a single markdown‑flavoured string representing the entire
-    conversation (submission + ancestor chain) that led to trigger_comment.
+    conversation (submission + ancestor chain) that led to trigger_comment,
+    and a list of image URLs found in the thread.
     """
     sub = trigger_comment.submission
     subreddit_name = trigger_comment.subreddit.display_name
     parts = [f"SUBREDDIT: r/{subreddit_name}"]
     parts.append(f"SUBMISSION TITLE: {sub.title.strip()}")
+
+    all_image_urls = []
+
+    # Extract images from submission post
+    # Check sub.url if it's a direct image link (common for image posts)
+    if hasattr(sub, 'url') and sub.url:
+        if IMAGE_URL_DIRECT_PATTERN.fullmatch(sub.url):
+            all_image_urls.append(sub.url)
+        # If post_hint is 'image', sub.url is usually the direct image
+        elif hasattr(sub, 'post_hint') and sub.post_hint == 'image':
+            all_image_urls.append(sub.url)
+
     if sub.is_self and sub.selftext:
-        parts.append(sub.selftext.strip())
+        stripped_selftext = sub.selftext.strip()
+        parts.append(stripped_selftext)
+        all_image_urls.extend(extract_image_urls_from_text(stripped_selftext))
+    
+    # Extract images from gallery posts
+    if hasattr(sub, 'is_gallery') and sub.is_gallery and hasattr(sub, 'media_metadata') and sub.media_metadata:
+        for item_id, media_item in sub.media_metadata.items():
+            # Look for image type 'p' (presumably picture) or direct 'u' (URL)
+            if media_item.get('m') and 'image' in media_item['m'] and media_item.get('s', {}).get('u'): # prefer 'u' for direct URL
+                 all_image_urls.append(media_item['s']['u'].replace('&amp;', '&'))
+            elif media_item.get('e') == 'Image' and media_item.get('s', {}).get('u'): # Fallback for other structures
+                 all_image_urls.append(media_item['s']['u'].replace('&amp;', '&'))
+
     parts.append("\n---")   # divider
 
     # Collect ancestor comments (root → trigger)
@@ -107,25 +152,31 @@ def build_thread_transcript(trigger_comment: praw.models.Comment) -> str:
     for cm in ancestors:
         author = cm.author.name if cm.author else "[deleted]"
         body   = cm.body.strip() or "[empty]"
+        all_image_urls.extend(extract_image_urls_from_text(body))
         quoted = textwrap.indent(body, INDENT)
         parts.append(f"{author} wrote:\n{quoted}\n")
 
     transcript = "\n".join(parts)
     if len(transcript) > MAX_CHARS:           # trim if oversized
         transcript = transcript[-MAX_CHARS:]
-    return transcript
+    
+    # Deduplicate and limit images
+    unique_image_urls = list(dict.fromkeys(all_image_urls))
+    return transcript, unique_image_urls[:MAX_IMAGES_TO_SEND]
 
 
 # ──────────────────────────────────────────────────────────────────────────
 # 6. Send prompt to LLM and get answer
 # ──────────────────────────────────────────────────────────────────────────
 def ai_answer(trigger_comment: praw.models.Comment) -> str:
-    thread_text = build_thread_transcript(trigger_comment)
+    thread_text, image_urls = build_thread_transcript(trigger_comment)
     user_question = TRIGGER.sub("", trigger_comment.body, 1).strip() or "(no explicit question)"
 
-    prompt = f"""
-You are a helpful Reddit assistant nicknamed Grok. Below is the full thread that led to the
-user's last comment. Use it to craft an accurate, concise reply. Write your final answer
+    prompt_header = f"""
+You are a helpful Reddit assistant. Users may refer to you by a nickname like @AI, @gemini, @chatgpt, or @grok. 
+Your goal is to answer their question and provide helpful context in a friendly manner. 
+To do that, you will be given the full conversation thread that led to their question, as well as tools such as web search and image analysis. 
+Below is the full thread that led to the user's last comment. Use it to craft an accurate, concise reply. Write your final answer
 as if you were replying directly to the user on Reddit. Do not include any preamble or explanation, just
 provide the answer.
 
@@ -136,10 +187,28 @@ provide the answer.
 USER QUESTION (last comment): {user_question}
 """.strip()
 
+    content_parts = [{"type": "text", "text": prompt_header}]
+
+    if image_urls:
+        print(f"  ℹ️ Including {len(image_urls)} image(s) in the prompt:")
+        for url in image_urls:
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {"url": url}
+            })
+            print(f"    🖼️ {url}")
+    else:
+        print("  ℹ️ No images found or included for this thread.")
+
     resp = client.chat.completions.create(
         model=MODEL,
-        messages=[{"role": "user", "content": prompt}]
+        messages=[{"role": "user", "content": content_parts}],
+        extra_body={
+            "plugins": [{"id": "web"}]
+        }
     )
+
+    
     return resp.choices[0].message.content.strip()
 
 
@@ -164,7 +233,6 @@ def main() -> None:
                 continue
 
             print(f"↳ Trigger detected in r/{comment.subreddit.display_name} | {comment.id}")
-            print("  ✔ Thread context:", build_thread_transcript(comment))
             reply_text = ai_answer(comment) + "\n\n---\n\n*^(This comment was generated by " + MODEL + ")*"
             comment.reply(f"{reply_text}")
             with stats_lock:
