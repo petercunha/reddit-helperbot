@@ -206,14 +206,14 @@ USER QUESTION (last comment): {user_question}
         print("  ℹ️ No images found or included for this thread.")
 
     # print("content_parts:", content_parts)
-
+    current_date = datetime.datetime.now().strftime("%Y-%m-%d")
     resp = client.chat.completions.create(
         model=MODEL,
         messages=[{"role": "user", "content": content_parts}],
         extra_body={
             "plugins": [{
                 "id": "web",
-                "search_prompt": "Some relevant web results:"
+                "search_prompt": f"A web search was conducted on {current_date}. If you think it would be helpful to the user, you can incorporate the following web search results into your response. IMPORTANT: If you do decide to include link citations, cite them using markdown links named using the domain of the source. Example: [nytimes.com](https://nytimes.com/some-page)."
             }]
         }
     )
