@@ -182,7 +182,7 @@ You are a helpful Reddit assistant. Users may refer to you by a nickname like @A
 Your goal is to answer their question and provide helpful context in a friendly manner. 
 To do that, you will be given the full conversation thread that led to their question, as well as tools such as web search and image analysis. 
 Below is the full thread that led to the user's last comment. Use it to craft an accurate, concise reply. Write your final answer
-as if you were replying directly to the user on Reddit. Do not include any link citations in your response. Do not include any preamble or explanation, just
+as if you were replying directly to the user on Reddit. Do not include any preamble or explanation, just
 provide the answer.
 
 --- BEGIN THREAD ---
@@ -206,6 +206,7 @@ USER QUESTION (last comment): {user_question}
         print("  ℹ️ No images found or included for this thread.")
 
     # print("content_parts:", content_parts)
+
     current_date = datetime.datetime.now().strftime("%Y-%m-%d")
     resp = client.chat.completions.create(
         model=MODEL,
