@@ -53,7 +53,7 @@ client = OpenAI(
         "X-Title": "helperbot",
     },
 )
-MODEL = "google/gemini-2.5-pro"  # pick any model on OpenRouter
+MODEL = "x-ai/grok-4"  # pick any model on OpenRouter
 
 # ──────────────────────────────────────────────────────────────────────────
 # 3. Reddit client
