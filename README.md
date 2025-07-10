@@ -2,6 +2,9 @@
 
 HelperBot is a Python-based Reddit bot that listens for specific words in comments (like `@AI`). When activated, it reads the conversation thread, sends it to an AI model via OpenRouter, and posts the AI's response back to Reddit.
 
+## How to use
+Summon bot on Reddit by starting your message with @grok
+
 ## ✨ Features
 
 - Listens for comments starting with `@ai`, `@chatgpt`, `@gemini`, or `@grok` (case-insensitive).
