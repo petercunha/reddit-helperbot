@@ -1,3 +1,6 @@
 praw
 python-dotenv
 openai
+requests
+trafilatura
+playwright

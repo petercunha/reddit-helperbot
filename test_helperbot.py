@@ -11,6 +11,9 @@ class FakeSubmission:
     title = "Test Submission"
     selftext = "Test selftext"
     is_self = True
+    permalink = "/r/testsub/comments/test_submission"
+    url = ""
+    post_hint = ""
 
 class FakeAuthor:
     name = "testuser"
@@ -78,6 +81,28 @@ class TestHelperBot(unittest.TestCase):
         # Check that the Reddit client's configuration contains the expected user agent.
         agent = main.reddit.config.user_agent
         self.assertIn("helperbot", agent.lower())
+
+    def test_web_open_url_rejects_non_http_scheme(self):
+        result = main.run_web_open_url_tool({"url": "file:///etc/passwd"})
+        self.assertIn("error", result)
+
+    @patch("main.requests.get")
+    def test_web_open_url_fetch_extracts_text(self, mock_get):
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.url = "https://example.com/page"
+        fake_resp.headers = {"content-type": "text/html; charset=utf-8"}
+        fake_resp.encoding = "utf-8"
+        fake_resp.content = b"<html><head><title>Example</title></head><body><article><p>Hello world</p></article></body></html>"
+        fake_resp.raise_for_status.return_value = None
+        mock_get.return_value = fake_resp
+
+        result = main.run_web_open_url_tool(
+            {"url": "https://example.com/page", "mode": "fetch", "max_chars": 500}
+        )
+        self.assertEqual(result.get("mode_used"), "fetch")
+        self.assertEqual(result.get("title"), "Example")
+        self.assertIn("Hello", result.get("text", ""))
 
 if __name__ == '__main__':
     unittest.main()
