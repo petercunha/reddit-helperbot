@@ -9,9 +9,10 @@ tool-calling loop, and retry logic.
 
 import json
 import os
+import sys
 import time
 import unittest
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 
@@ -742,7 +743,15 @@ class TestWebRenderTool(unittest.TestCase):
         mock_cm.__enter__ = MagicMock(return_value=mock_pw_instance)
         mock_cm.__exit__ = MagicMock(return_value=False)
 
-        with patch("playwright.sync_api.sync_playwright", return_value=mock_cm):
+        fake_playwright = ModuleType("playwright")
+        fake_sync_api = ModuleType("playwright.sync_api")
+        fake_sync_api.sync_playwright = MagicMock(return_value=mock_cm)
+        fake_playwright.sync_api = fake_sync_api
+
+        with patch.dict(
+            sys.modules,
+            {"playwright": fake_playwright, "playwright.sync_api": fake_sync_api},
+        ):
             result = run_web_render_tool({"url": "https://spa.example.com"})
 
         self.assertEqual(result["url"], "https://spa.example.com")
@@ -765,7 +774,15 @@ class TestWebRenderTool(unittest.TestCase):
         mock_cm.__enter__ = MagicMock(return_value=mock_pw_instance)
         mock_cm.__exit__ = MagicMock(return_value=False)
 
-        with patch("playwright.sync_api.sync_playwright", return_value=mock_cm):
+        fake_playwright = ModuleType("playwright")
+        fake_sync_api = ModuleType("playwright.sync_api")
+        fake_sync_api.sync_playwright = MagicMock(return_value=mock_cm)
+        fake_playwright.sync_api = fake_sync_api
+
+        with patch.dict(
+            sys.modules,
+            {"playwright": fake_playwright, "playwright.sync_api": fake_sync_api},
+        ):
             result = run_web_render_tool({"url": "https://crash.example.com"})
 
         self.assertIn("error", result)
