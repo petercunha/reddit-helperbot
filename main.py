@@ -23,6 +23,7 @@ from html import unescape
 from dotenv import load_dotenv
 import praw
 import requests
+import urllib3
 from openai import OpenAI
 
 try:
@@ -68,18 +69,12 @@ MODEL = "moonshotai/kimi-k2.5"  # strong model for agentic tool use
 # ──────────────────────────────────────────────────────────────────────────
 # 2b. Web search settings (SearXNG)
 # ──────────────────────────────────────────────────────────────────────────
-SEARXNG_BASE_URL = os.getenv("SEARXNG_BASE_URL", "").strip().rstrip("/")
-SEARXNG_RESULTS = int(os.getenv("SEARXNG_RESULTS", "5"))
-SEARXNG_TIMEOUT_SEC = float(os.getenv("SEARXNG_TIMEOUT_SEC", "10"))
-SEARXNG_LANGUAGE = os.getenv("SEARXNG_LANGUAGE", "en-US")
-MAX_TOOL_STEPS = int(os.getenv("MAX_TOOL_STEPS", "4"))
-URL_FETCH_TIMEOUT_SEC = float(os.getenv("URL_FETCH_TIMEOUT_SEC", "12"))
-URL_RENDER_TIMEOUT_SEC = float(os.getenv("URL_RENDER_TIMEOUT_SEC", "20"))
-URL_MAX_BYTES = int(os.getenv("URL_MAX_BYTES", str(1_500_000)))
-URL_MAX_TEXT_CHARS = int(os.getenv("URL_MAX_TEXT_CHARS", "12000"))
-URL_MAX_LINKS = int(os.getenv("URL_MAX_LINKS", "25"))
-URL_MIN_GOOD_TEXT_CHARS = int(os.getenv("URL_MIN_GOOD_TEXT_CHARS", "500"))
-URL_TOOL_USER_AGENT = os.getenv("URL_TOOL_USER_AGENT", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36")
+SEARXNG_BASE_URL = os.getenv("SEARXNG_BASE_URL", "https://seedbox.local/searxng").strip().rstrip("/")
+MAX_TOOL_STEPS = 4
+URL_TOOL_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+
+# Trust local SearXNG even with self-signed/invalid TLS certificates.
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -143,7 +138,7 @@ def fetch_searxng_results(
     params = {
         "q": query,
         "format": "json",
-        "language": language or SEARXNG_LANGUAGE,
+        "language": language or "en-US",
         "pageno": max(pageno, 1),
     }
     if categories:
@@ -152,7 +147,7 @@ def fetch_searxng_results(
         params["time_range"] = time_range
 
     try:
-        resp = requests.get(search_url, params=params, timeout=SEARXNG_TIMEOUT_SEC)
+        resp = requests.get(search_url, params=params, timeout=10, verify=False)
         resp.raise_for_status()
         payload = resp.json()
     except Exception as exc:
@@ -162,7 +157,7 @@ def fetch_searxng_results(
     results = payload.get("results", [])
     if not isinstance(results, list):
         return []
-    cap = max_results if isinstance(max_results, int) else SEARXNG_RESULTS
+    cap = max_results if isinstance(max_results, int) else 5
     return results[:max(cap, 0)]
 
 
@@ -224,7 +219,7 @@ def extract_links_from_html(html: str, base_url: str) -> list[str]:
         parsed = urlparse(resolved)
         if parsed.scheme in {"http", "https"}:
             links.append(resolved)
-            if len(links) >= URL_MAX_LINKS:
+            if len(links) >= 25:
                 break
     return list(dict.fromkeys(links))
 
@@ -287,7 +282,7 @@ def fetch_url_with_requests(url: str) -> dict[str, Any]:
     try:
         resp = requests.get(
             url,
-            timeout=URL_FETCH_TIMEOUT_SEC,
+            timeout=12,
             headers={"User-Agent": URL_TOOL_USER_AGENT},
             allow_redirects=True,
         )
@@ -296,9 +291,9 @@ def fetch_url_with_requests(url: str) -> dict[str, Any]:
         return {"error": f"fetch_failed: {exc}"}
 
     raw = resp.content or b""
-    bytes_truncated = len(raw) > URL_MAX_BYTES
+    bytes_truncated = len(raw) > 1_500_000
     if bytes_truncated:
-        raw = raw[:URL_MAX_BYTES]
+        raw = raw[:1_500_000]
 
     content_type = (resp.headers.get("content-type") or "").lower()
     encoding = resp.encoding or "utf-8"
@@ -335,7 +330,7 @@ def fetch_url_with_playwright(url: str) -> dict[str, Any]:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)
             page = browser.new_page(user_agent=URL_TOOL_USER_AGENT)
-            response = page.goto(url, wait_until="networkidle", timeout=int(URL_RENDER_TIMEOUT_SEC * 1000))
+            response = page.goto(url, wait_until="networkidle", timeout=20_000)
             html = page.content()
             final_url = page.url
             status = response.status if response is not None else None
@@ -358,7 +353,7 @@ def should_use_render_fallback(fetch_result: dict[str, Any]) -> bool:
     if not fetch_result.get("is_html"):
         return False
     text = str(fetch_result.get("extracted_text") or "")
-    return len(text.strip()) < URL_MIN_GOOD_TEXT_CHARS
+    return len(text.strip()) < 500
 
 
 def normalize_open_mode(mode: Any) -> str:
@@ -406,8 +401,8 @@ def run_web_open_url_tool(arguments: dict[str, Any]) -> dict[str, Any]:
     include_links = include_links_raw if isinstance(include_links_raw, bool) else True
     max_chars = arguments.get("max_chars")
     if not isinstance(max_chars, int):
-        max_chars = URL_MAX_TEXT_CHARS
-    max_chars = max(500, min(max_chars, URL_MAX_TEXT_CHARS))
+        max_chars = 12000
+    max_chars = max(500, min(max_chars, 12000))
 
     if not url:
         return {"error": "url is required"}
@@ -480,6 +475,76 @@ def message_content_to_text(content: Any) -> str:
                 chunks.append(str(getattr(item, "text", "") or ""))
         return "\n".join(chunks).strip()
     return ""
+
+
+def truncate_for_log(text: str, max_chars: int = 1200) -> str:
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "... [truncated]"
+
+
+def message_to_dict(message: Any) -> dict[str, Any]:
+    if hasattr(message, "model_dump"):
+        try:
+            dumped = message.model_dump(exclude_none=True)
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            return {}
+    if isinstance(message, dict):
+        return message
+    return {}
+
+
+def extract_reasoning_for_log(message: Any) -> str:
+    msg_dict = message_to_dict(message)
+
+    reasoning = msg_dict.get("reasoning")
+    if isinstance(reasoning, str) and reasoning.strip():
+        return truncate_for_log(reasoning)
+    if isinstance(reasoning, dict) and reasoning:
+        return truncate_for_log(json.dumps(reasoning, ensure_ascii=False))
+    if isinstance(reasoning, list) and reasoning:
+        return truncate_for_log(json.dumps(reasoning, ensure_ascii=False))
+
+    details = msg_dict.get("reasoning_details")
+    if isinstance(details, list) and details:
+        return truncate_for_log(json.dumps(details, ensure_ascii=False))
+
+    # Fallback for SDK object attrs
+    attr_reasoning = getattr(message, "reasoning", None)
+    if isinstance(attr_reasoning, str) and attr_reasoning.strip():
+        return truncate_for_log(attr_reasoning)
+    if attr_reasoning is not None:
+        return truncate_for_log(str(attr_reasoning))
+
+    return ""
+
+
+def log_assistant_step(step: int, finish_reason: str | None, assistant_message: Any) -> None:
+    print(f"  🧠 Assistant step {step + 1} finish_reason={finish_reason or 'unknown'}")
+
+    reasoning_text = extract_reasoning_for_log(assistant_message)
+    if reasoning_text:
+        print(f"  🧩 Reasoning: {reasoning_text}")
+    else:
+        print("  🧩 Reasoning: [not provided by model/provider]")
+
+    assistant_text = message_content_to_text(getattr(assistant_message, "content", ""))
+    if assistant_text:
+        print(f"  💬 Assistant content: {truncate_for_log(assistant_text)}")
+
+
+def summarize_tool_result(tool_name: str, result: dict[str, Any]) -> str:
+    if tool_name == "web_search":
+        return f"result_count={result.get('result_count', 0)} query={result.get('query', '')!r}"
+    if tool_name == "web_open_url":
+        return (
+            f"mode={result.get('mode_used')} status={result.get('status_code')} "
+            f"text_length={result.get('text_length')} error={result.get('error')}"
+        )
+    return truncate_for_log(json.dumps(result, ensure_ascii=False), max_chars=300)
 
 # ──────────────────────────────────────────────────────────────────────────
 # 5. Build a transcript: submission + ancestor comments
@@ -559,6 +624,23 @@ def build_thread_transcript(trigger_comment: praw.models.Comment) -> tuple[str, 
 def ai_answer(trigger_comment: praw.models.Comment) -> str:
     thread_text, image_urls = build_thread_transcript(trigger_comment)
     user_question = TRIGGER.sub("", trigger_comment.body, 1).strip() or "(no explicit question)"
+    now_local = datetime.datetime.now().astimezone()
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    local_stamp = now_local.strftime("%Y-%m-%d %H:%M:%S %Z")
+    utc_stamp = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    system_message = f"""
+You are a helpful Reddit assistant.
+Current date/time (authoritative):
+- Local: {local_stamp}
+- UTC: {utc_stamp}
+
+Use tools deliberately:
+- Use web_search for current events, prices, schedules, releases, laws, or any uncertain/time-sensitive claim.
+- Use web_open_url to read source URLs before summarizing or citing them.
+- Do not fabricate browsing results.
+If tool output is missing/insufficient, acknowledge uncertainty briefly.
+""".strip()
 
     prompt_header = f"""
 You are a helpful Reddit assistant. Users may refer to you by a nickname like @AI, @gemini, @chatgpt, or @grok. 
@@ -591,7 +673,10 @@ USER QUESTION (last comment): {user_question}
     else:
         print("  ℹ️ No images found or included for this thread.")
 
-    messages: list[dict[str, Any]] = [{"role": "user", "content": content_parts}]
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": content_parts},
+    ]
     tools = [
         {
             "type": "function",
@@ -665,13 +750,27 @@ USER QUESTION (last comment): {user_question}
     ]
 
     for step in range(MAX_TOOL_STEPS):
+        request_kwargs: dict[str, Any] = {
+            "model": MODEL,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "extra_body": {
+                "reasoning": {
+                    "enabled": True,
+                    "effort": "high",
+                }
+            },
+        }
+
         resp = client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
+            **request_kwargs,
         )
-        assistant_message = resp.choices[0].message
+        choice = resp.choices[0]
+        assistant_message = choice.message
+        finish_reason = getattr(choice, "finish_reason", None)
+        log_assistant_step(step, finish_reason, assistant_message)
         tool_calls = getattr(assistant_message, "tool_calls", None)
 
         if isinstance(tool_calls, list) and tool_calls:
@@ -701,6 +800,7 @@ USER QUESTION (last comment): {user_question}
                     tool_result = run_web_open_url_tool(parsed_args)
                 else:
                     tool_result = {"error": f"Unknown tool: {tool_name}"}
+                print(f"  ✅ Tool result: {tool_name} -> {summarize_tool_result(tool_name, tool_result)}")
 
                 messages.append(
                     {

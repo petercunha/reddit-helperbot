@@ -60,18 +60,6 @@ Follow these steps to get HelperBot up and running:
     # 2. SearXNG (self-hosted) for model tool calls
     #    Example from your setup:
     SEARXNG_BASE_URL="https://seedbox.local/searxng"
-    # Optional:
-    SEARXNG_RESULTS="5"
-    SEARXNG_TIMEOUT_SEC="10"
-    SEARXNG_LANGUAGE="en-US"
-    MAX_TOOL_STEPS="4"
-    URL_FETCH_TIMEOUT_SEC="12"
-    URL_RENDER_TIMEOUT_SEC="20"
-    URL_MAX_BYTES="1500000"
-    URL_MAX_TEXT_CHARS="12000"
-    URL_MAX_LINKS="25"
-    URL_MIN_GOOD_TEXT_CHARS="500"
-    URL_TOOL_USER_AGENT="helperbot/1.0 (+https://github.com/mygithub/helperbot)"
     # Optional for rendered browsing:
     # pip install playwright && playwright install chromium
 
@@ -102,12 +90,6 @@ You can customize the bot's behavior by editing the settings near the top of `ma
 
 - `MODEL`: Change the OpenRouter model used for generating replies (default: `moonshotai/kimi-k2.5`).
 - `SEARXNG_BASE_URL`: Base URL of your SearXNG instance used by the `web_search` tool.
-- `SEARXNG_RESULTS`: Default max number of tool results returned per query.
-- `MAX_TOOL_STEPS`: Max number of tool-calling iterations per answer.
-- `URL_FETCH_TIMEOUT_SEC`: Timeout for normal URL fetches.
-- `URL_RENDER_TIMEOUT_SEC`: Timeout for rendered (Playwright) browsing.
-- `URL_MAX_TEXT_CHARS`: Max text returned by `web_open_url`.
-- `URL_MIN_GOOD_TEXT_CHARS`: In `mode=auto`, if extracted text is shorter than this, try rendered fallback.
 - `TRIGGER`: Modify the regular expression to change the trigger words or patterns.
 - `SUBS`: Specify which subreddits the bot should listen to (e.g., `["askreddit", "python"]`). `["all"]` listens everywhere.
 - `REDDIT_RATE_LIMIT_SEC`: Adjust the delay (in seconds) after posting a reply.
