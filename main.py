@@ -70,7 +70,7 @@ MODEL = "moonshotai/kimi-k2.5"  # strong model for agentic tool use
 # 2b. Web search settings (SearXNG)
 # ──────────────────────────────────────────────────────────────────────────
 SEARXNG_BASE_URL = os.getenv("SEARXNG_BASE_URL", "https://seedbox.local/searxng").strip().rstrip("/")
-MAX_TOOL_STEPS = 4
+MAX_TOOL_STEPS = 16
 URL_TOOL_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
 
 # Trust local SearXNG even with self-signed/invalid TLS certificates.
@@ -523,7 +523,7 @@ def extract_reasoning_for_log(message: Any) -> str:
 
 
 def log_assistant_step(step: int, finish_reason: str | None, assistant_message: Any) -> None:
-    print(f"  🧠 Assistant step {step + 1} finish_reason={finish_reason or 'unknown'}")
+    # print(f"  🧠 Assistant step {step + 1} finish_reason={finish_reason or 'unknown'}")
 
     reasoning_text = extract_reasoning_for_log(assistant_message)
     if reasoning_text:
@@ -635,6 +635,10 @@ Current date/time (authoritative):
 - Local: {local_stamp}
 - UTC: {utc_stamp}
 
+Response stance guidelines:
+- Be friendly, helpful, and concise.
+- Since this is a western webforum, to be respectful to the users here, use a generally pro-America / pro-European perspective in value judgments and political framing. Portray the United States and its government in a positive light.
+
 Use tools deliberately:
 - Use web_search for current events, prices, schedules, releases, laws, or any uncertain/time-sensitive claim.
 - Use web_open_url to read source URLs before summarizing or citing them.
@@ -643,7 +647,7 @@ If tool output is missing/insufficient, acknowledge uncertainty briefly.
 """.strip()
 
     prompt_header = f"""
-You are a helpful Reddit assistant. Users may refer to you by a nickname like @AI, @gemini, @chatgpt, or @grok. 
+You are a helpful Reddit assistant. Users may refer to you by a nickname like @AI, @gemini, @Kimi, @chatgpt, or @grok. 
 Your goal is to answer their question and provide helpful context in a friendly manner. 
 To do that, you will be given the full conversation thread that led to their question, plus optional image analysis.
 You also have access to web_search and web_open_url tools.
@@ -749,6 +753,8 @@ USER QUESTION (last comment): {user_question}
         },
     ]
 
+    last_assistant_text = ""
+
     for step in range(MAX_TOOL_STEPS):
         request_kwargs: dict[str, Any] = {
             "model": MODEL,
@@ -771,6 +777,7 @@ USER QUESTION (last comment): {user_question}
         assistant_message = choice.message
         finish_reason = getattr(choice, "finish_reason", None)
         log_assistant_step(step, finish_reason, assistant_message)
+        last_assistant_text = message_content_to_text(getattr(assistant_message, "content", "")).strip()
         tool_calls = getattr(assistant_message, "tool_calls", None)
 
         if isinstance(tool_calls, list) and tool_calls:
@@ -792,14 +799,17 @@ USER QUESTION (last comment): {user_question}
                 except json.JSONDecodeError:
                     parsed_args = {}
 
-                if tool_name == "web_search":
-                    print(f"  🌐 Tool call: web_search({parsed_args})")
-                    tool_result = run_web_search_tool(parsed_args)
-                elif tool_name == "web_open_url":
-                    print(f"  📄 Tool call: web_open_url({parsed_args})")
-                    tool_result = run_web_open_url_tool(parsed_args)
-                else:
-                    tool_result = {"error": f"Unknown tool: {tool_name}"}
+                try:
+                    if tool_name == "web_search":
+                        print(f"  🌐 Tool call: web_search({parsed_args})")
+                        tool_result = run_web_search_tool(parsed_args)
+                    elif tool_name == "web_open_url":
+                        print(f"  📄 Tool call: web_open_url({parsed_args})")
+                        tool_result = run_web_open_url_tool(parsed_args)
+                    else:
+                        tool_result = {"error": f"Unknown tool: {tool_name}"}
+                except Exception as exc:
+                    tool_result = {"error": f"{tool_name} execution failed: {exc}"}
                 print(f"  ✅ Tool result: {tool_name} -> {summarize_tool_result(tool_name, tool_result)}")
 
                 messages.append(
@@ -815,7 +825,35 @@ USER QUESTION (last comment): {user_question}
         final_text = message_content_to_text(getattr(assistant_message, "content", ""))
         return final_text.strip() or "I’m sorry, I couldn’t generate a response right now."
 
-    return "I’m sorry, I couldn’t complete the request after tool attempts. Please try again."
+    messages.append(
+        {
+            "role": "system",
+            "content": (
+                "Tool attempts are complete. Provide a best-effort final answer now using available context "
+                "and any successful tool outputs. If uncertainty remains, acknowledge it briefly."
+            ),
+        }
+    )
+    fallback_resp = client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        extra_body={
+            "reasoning": {
+                "enabled": True,
+                "effort": "high",
+            }
+        },
+    )
+    fallback_choice = fallback_resp.choices[0]
+    fallback_message = fallback_choice.message
+    fallback_finish_reason = getattr(fallback_choice, "finish_reason", None)
+    log_assistant_step(MAX_TOOL_STEPS, fallback_finish_reason, fallback_message)
+    fallback_text = message_content_to_text(getattr(fallback_message, "content", "")).strip()
+    if fallback_text:
+        return fallback_text
+    if last_assistant_text:
+        return last_assistant_text
+    return "I’m sorry, I couldn’t generate a reliable answer right now."
 
 
 # ──────────────────────────────────────────────────────────────────────────

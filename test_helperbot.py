@@ -200,5 +200,34 @@ class TestHelperBot(unittest.TestCase):
         self.assertEqual(answer, "Final answer from url")
         mock_run_web_open.assert_called_once_with({"url": "https://example.com", "mode": "fetch"})
 
+    @patch("main.run_web_search_tool")
+    @patch("main.client.chat.completions.create")
+    def test_ai_answer_falls_back_after_max_tool_steps(self, mock_create, mock_run_web_search):
+        tool_call = SimpleNamespace(
+            id="tc_loop",
+            function=SimpleNamespace(
+                name="web_search",
+                arguments=json.dumps({"query": "looping query"})
+            ),
+        )
+        tool_message = SimpleNamespace(content="", tool_calls=[tool_call], reasoning=None)
+        tool_response = SimpleNamespace(
+            choices=[SimpleNamespace(message=tool_message, finish_reason="tool_calls")]
+        )
+        final_message = SimpleNamespace(content="Best-effort final answer", tool_calls=None, reasoning=None)
+        final_response = SimpleNamespace(
+            choices=[SimpleNamespace(message=final_message, finish_reason="stop")]
+        )
+
+        mock_create.side_effect = [tool_response] * main.MAX_TOOL_STEPS + [final_response]
+        mock_run_web_search.return_value = {"query": "looping query", "result_count": 0, "error": "timeout"}
+
+        fake_comment = FakeComment("u/grok whats the news today?")
+        answer = main.ai_answer(fake_comment)
+
+        self.assertEqual(answer, "Best-effort final answer")
+        self.assertEqual(mock_create.call_count, main.MAX_TOOL_STEPS + 1)
+        self.assertNotIn("tools", mock_create.call_args_list[-1].kwargs)
+
 if __name__ == '__main__':
     unittest.main()
