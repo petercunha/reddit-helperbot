@@ -103,21 +103,29 @@ Follow these steps to get HelperBot up and running:
 
 ## Running with Docker Compose
 
-```bash
-docker compose up -d --build --force-recreate
-```
-
-Useful commands:
+Use the included `Makefile` shortcuts:
 
 ```bash
-# View running container
-docker compose ps
+# Server deploy (recommended)
+make deploy
+
+# Server deploy with forced container replacement
+make deploy-fresh
+
+# Local dev (foreground)
+make dev
+
+# Local dev with auto-rebuild on file changes
+make watch
 
 # Follow logs
-docker compose logs -f helperbot
+make logs
+
+# View running container
+make ps
 
 # Stop and remove container/network
-docker compose down
+make down
 ```
 
 ## Configuration

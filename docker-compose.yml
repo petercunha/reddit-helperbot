@@ -6,3 +6,11 @@ services:
     env_file:
       - .env
     restart: always
+    develop:
+      watch:
+        - action: rebuild
+          path: .
+          ignore:
+            - .git/
+            - __pycache__/
+            - .venv/
