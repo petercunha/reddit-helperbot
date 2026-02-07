@@ -101,11 +101,23 @@ Follow these steps to get HelperBot up and running:
     ```
     The bot will validate that all required environment variables are set, then start listening for comments.
 
-## Running with Docker
+## Running with Docker Compose
 
 ```bash
-docker build -t helperbot .
-docker run -d --restart=always --name helperbot --env-file .env helperbot
+docker compose up -d --build --force-recreate
+```
+
+Useful commands:
+
+```bash
+# View running container
+docker compose ps
+
+# Follow logs
+docker compose logs -f helperbot
+
+# Stop and remove container/network
+docker compose down
 ```
 
 ## Configuration

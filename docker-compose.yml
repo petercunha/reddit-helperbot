@@ -1,0 +1,8 @@
+services:
+  helperbot:
+    build:
+      context: .
+    container_name: helperbot
+    env_file:
+      - .env
+    restart: always
