@@ -79,7 +79,7 @@ URL_MAX_BYTES = int(os.getenv("URL_MAX_BYTES", str(1_500_000)))
 URL_MAX_TEXT_CHARS = int(os.getenv("URL_MAX_TEXT_CHARS", "12000"))
 URL_MAX_LINKS = int(os.getenv("URL_MAX_LINKS", "25"))
 URL_MIN_GOOD_TEXT_CHARS = int(os.getenv("URL_MIN_GOOD_TEXT_CHARS", "500"))
-URL_TOOL_USER_AGENT = os.getenv("URL_TOOL_USER_AGENT", "helperbot/1.0 (+https://github.com/mygithub/helperbot)")
+URL_TOOL_USER_AGENT = os.getenv("URL_TOOL_USER_AGENT", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36")
 
 
 # ──────────────────────────────────────────────────────────────────────────
