@@ -5,27 +5,45 @@ HelperBot is a Python-based Reddit bot that listens for specific words in commen
 ## How to use
 Summon bot on Reddit by starting your message with @grok
 
-## ✨ Features
+## Features
 
-- Listens for comments starting with `@ai`, `@chatgpt`, `@gemini`, or `@grok` (case-insensitive).
-- Fetches the entire conversation context (submission + comments).
+- Listens for comments starting with `@ai`, `@chatgpt`, `@gemini`, `@gpt`, or `@grok` (case-insensitive).
+- Fetches the entire conversation context (submission + ancestor comments), including images.
 - Uses OpenRouter to connect to various Large Language Models (LLMs).
 - Exposes a model tool (`web_search`) backed by your own SearXNG instance (instead of OpenRouter's paid web plugin).
 - Exposes a model tool (`web_open_url`) to fetch and extract readable content from URLs, with optional rendered fallback.
 - Posts the LLM's generated reply back to the comment.
 - Configurable settings for trigger words, target subreddits, and rate limiting.
+- Structured logging via Python's `logging` module.
+- Graceful shutdown on SIGINT/SIGTERM.
+- Automatic retry with backoff for Reddit API failures.
 
-## 📋 Requirements
+## Requirements
 
-- Python 3.x
+- Python 3.9+
 - `pip` (Python package installer)
 
-## 🚀 Getting Started
+## Project Structure
+
+```
+reddit-helperbot/
+├── main.py              # Entry point: main loop, signal handling, stats
+├── config.py            # Configuration, env validation, client init
+├── llm.py               # LLM interaction and tool-calling loop
+├── tools.py             # Web search (SearXNG) and URL fetching tools
+├── transcript.py        # Reddit thread transcript and image extraction
+├── test_helperbot.py    # Unit tests (51 tests)
+├── requirements.txt     # Pinned dependencies
+├── Dockerfile           # Container setup (Python 3.12)
+├── .env.example         # Template for secrets
+└── .gitignore
+```
+
+## Getting Started
 
 Follow these steps to get HelperBot up and running:
 
-1.  **Clone the Repository (Optional):**
-    If you haven't already, download or clone this repository to your local machine.
+1.  **Clone the Repository:**
 
     ```bash
     git clone https://github.com/petercunha/reddit-helperbot.git
@@ -40,14 +58,18 @@ Follow these steps to get HelperBot up and running:
     ```
 
 3.  **Install Dependencies:**
-    Install the required Python libraries.
 
     ```bash
-    pip install praw python-dotenv openai requests trafilatura
+    pip install -r requirements.txt
+    ```
+
+    For rendered web fetching (optional):
+    ```bash
+    playwright install chromium
     ```
 
 4.  **Create `.env` File:**
-    Create a file named `.env` in the same directory as `main.py`. This file will store your sensitive credentials. **Do not share this file.**
+    Create a file named `.env` in the project root. **Do not share this file.**
 
     Copy and paste the following template into your `.env` file and fill in your actual credentials:
 
@@ -58,60 +80,65 @@ Follow these steps to get HelperBot up and running:
     OPENROUTER_API_KEY="sk-or-v1-..."
 
     # 2. SearXNG (self-hosted) for model tool calls
-    #    Example from your setup:
     SEARXNG_BASE_URL="https://seedbox.local/searxng"
-    # Optional for rendered browsing:
-    # pip install playwright && playwright install chromium
 
     # 3. Reddit API Credentials (Create an app: https://www.reddit.com/prefs/apps)
     #    Select "script" type. Redirect URI can be http://localhost:8080
-    REDDIT_CLIENT_ID="YOUR_REDDIT_CLIENT_ID"          # Found under your app name
-    REDDIT_CLIENT_SECRET="YOUR_REDDIT_CLIENT_SECRET"  # The "secret" field
+    REDDIT_CLIENT_ID="YOUR_REDDIT_CLIENT_ID"
+    REDDIT_CLIENT_SECRET="YOUR_REDDIT_CLIENT_SECRET"
 
     # 4. Reddit Account Credentials (The bot's Reddit account)
     REDDIT_USERNAME="YOUR_BOTS_REDDIT_USERNAME"
     REDDIT_PASSWORD="YOUR_BOTS_REDDIT_PASSWORD"
 
     # 5. User Agent (A descriptive name for your bot instance)
-    #    Example: HelperBot v1.0 by u/YourUsername
     USER_AGENT="HelperBot v1.0 by u/YOUR_USERNAME"
     ```
 
 5.  **Run the Bot:**
-    Execute the main script from your terminal:
     ```bash
     python main.py
     ```
-    You should see the message "🟢 helperbot is live…" indicating the bot is running and listening for comments.
+    The bot will validate that all required environment variables are set, then start listening for comments.
 
-## ⚙️ Configuration
+## Running with Docker
 
-You can customize the bot's behavior by editing the settings near the top of `main.py`:
+```bash
+docker build -t helperbot .
+docker run -d --restart=always --name helperbot --env-file .env helperbot
+```
 
-- `MODEL`: Change the OpenRouter model used for generating replies (default: `moonshotai/kimi-k2.5`).
-- `SEARXNG_BASE_URL`: Base URL of your SearXNG instance used by the `web_search` tool.
-- `TRIGGER`: Modify the regular expression to change the trigger words or patterns.
-- `SUBS`: Specify which subreddits the bot should listen to (e.g., `["askreddit", "python"]`). `["all"]` listens everywhere.
-- `REDDIT_RATE_LIMIT_SEC`: Adjust the delay (in seconds) after posting a reply.
-- `MAX_CHARS`: Set a limit on the context length sent to the AI model.
+## Configuration
 
-## 🔎 SearXNG Categories (Examples)
+You can customize the bot's behavior by editing `config.py`:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `MODEL` | `moonshotai/kimi-k2.5` | OpenRouter model for generating replies |
+| `TRIGGER` | See regex | Regular expression for trigger words/patterns |
+| `SUBS` | `["all"]` | Subreddits to listen to (e.g., `["askreddit", "python"]`) |
+| `REDDIT_RATE_LIMIT_SEC` | `10` | Delay (seconds) after posting a reply |
+| `MAX_CHARS` | `40000` | Maximum context length sent to the AI model |
+| `MAX_TOOL_STEPS` | `16` | Maximum LLM tool-calling iterations |
+| `MAX_IMAGES_TO_SEND` | `5` | Maximum images included in the prompt |
+| `OPENROUTER_TIMEOUT` | `120` | API call timeout in seconds |
+
+## Testing
+
+Run the test suite:
+
+```bash
+python -m unittest test_helperbot -v
+```
+
+The test suite covers config validation, trigger regex, image extraction, transcript building, LLM message helpers, web search tools, the tool-calling loop, retry logic, and HTML parsing.
+
+## SearXNG Categories (Examples)
 
 When the model calls `web_search`, it can optionally pass a `categories` list.
 
-Example values:
-- `general`
-- `images`
-- `videos`
-- `news`
-- `map`
-- `music`
-- `it`
-- `science`
-- `files`
-- `social media`
+Example values: `general`, `images`, `videos`, `news`, `map`, `music`, `it`, `science`, `files`, `social media`
 
-Example tool args:
 ```json
 {
   "query": "latest spacex launch update",
@@ -122,6 +149,13 @@ Example tool args:
 
 Note: the exact available categories depend on your SearXNG instance configuration.
 
----
+## Troubleshooting
 
-Happy Botting! 🎉
+| Problem | Solution |
+|---------|----------|
+| `Missing required environment variables` at startup | Copy `.env.example` to `.env` and fill in all values |
+| Reddit rate-limit errors (HTTP 429) | Increase `REDDIT_RATE_LIMIT_SEC` in `config.py` |
+| SearXNG search failures | Check that `SEARXNG_BASE_URL` is reachable from the bot |
+| OpenRouter timeout errors | Increase `OPENROUTER_TIMEOUT` or try a faster model |
+| Bot account suspended | Reddit may suspend bot accounts for excessive posting; reduce `SUBS` scope |
+| `playwright_not_installed` errors | Run `playwright install chromium` |
