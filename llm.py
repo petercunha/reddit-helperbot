@@ -157,10 +157,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     },
                     "time_range": {
                         "type": "string",
-                        "enum": ["day", "month", "year"],
+                        "enum": ["day", "week", "month", "year"],
                         "description": (
-                            "Filter results by recency. Use 'day' for breaking news, "
-                            "'month' for recent developments, 'year' for the past year."
+                            "Filter results by recency. Use 'day' or 'week' for breaking news, "
+                            "'month' for recent developments, 'year' for the past year. Omit for no time filter."
                         ),
                     },
                     "language": {
@@ -176,7 +176,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                         "type": "integer",
                         "minimum": 1,
                         "maximum": 10,
-                        "description": "Maximum number of results to return. Defaults to 5.",
+                        "description": "Maximum number of results to return. Defaults to 10.",
                     },
                 },
                 "required": ["query"],
@@ -339,7 +339,7 @@ def ai_answer(trigger_comment: praw.models.Comment) -> str:
             "extra_body": {
                 "reasoning": {
                     "enabled": True,
-                    "effort": "high",
+                    # "effort": "high",
                 }
             },
         }

@@ -219,7 +219,7 @@ def _fetch_searxng(
     }
     if categories:
         params["categories"] = ",".join(categories)
-    if time_range in {"day", "month", "year"}:
+    if time_range in {"day", "week", "month", "year"}:
         params["time_range"] = time_range
 
     last_exc: Exception | None = None
@@ -233,7 +233,7 @@ def _fetch_searxng(
             results = payload.get("results", [])
             if not isinstance(results, list):
                 return []
-            cap = max_results if isinstance(max_results, int) else 5
+            cap = max_results if isinstance(max_results, int) else 10
             return results[: max(cap, 0)]
         except Exception as exc:
             last_exc = exc
