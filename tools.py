@@ -1,13 +1,20 @@
 """
-tools.py – Web-search and URL-fetching tools exposed to the LLM.
+tools.py – Web tools exposed to the LLM agent.
 
-Contains SearXNG integration (web_search) and URL fetching/rendering
-(web_open_url), plus all HTML parsing helpers.
+Three tools:
+  1. web_search  – Search the web via a self-hosted SearXNG instance.
+  2. web_fetch   – Lightweight HTTP GET that returns extracted readable text.
+  3. web_render  – Full Playwright browser render for JS-heavy pages.
+
+Each `run_*` function accepts a dict of arguments (as parsed from the LLM's
+tool call JSON) and returns a dict suitable for serialising back as a tool
+result message.
 """
 
 import json
 import logging
 import re
+import time
 from html import unescape
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -23,142 +30,70 @@ except ImportError:
 
 logger = logging.getLogger("helperbot.tools")
 
-# ── SearXNG search ───────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────
+# Shared helpers
+# ─────────────────────────────────────────────────────────────────────────
+
+# Simple in-memory URL cache: url -> (timestamp, result_dict)
+_url_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_URL_CACHE_TTL = 300  # 5 minutes
 
 
-def fetch_searxng_results(
-    query: str,
-    *,
-    categories: list[str] | None = None,
-    time_range: str | None = None,
-    pageno: int = 1,
-    language: str | None = None,
-    max_results: int | None = None,
-) -> list[dict[str, Any]]:
-    """Fetch web results from SearXNG. Returns [] if disabled or unavailable."""
-    if not SEARXNG_BASE_URL or not query:
-        return []
-
-    search_url = f"{SEARXNG_BASE_URL}/search"
-    params: dict[str, Any] = {
-        "q": query,
-        "format": "json",
-        "language": language or "en-US",
-        "pageno": max(pageno, 1),
-    }
-    if categories:
-        params["categories"] = ",".join(categories)
-    if time_range in {"day", "month", "year"}:
-        params["time_range"] = time_range
-
-    try:
-        resp = requests.get(search_url, params=params, timeout=10, verify=False)
-        resp.raise_for_status()
-        payload = resp.json()
-    except Exception as exc:
-        logger.warning("SearXNG search failed: %s", exc)
-        return []
-
-    results = payload.get("results", [])
-    if not isinstance(results, list):
-        return []
-    cap = max_results if isinstance(max_results, int) else 5
-    return results[: max(cap, 0)]
+def _get_cached(url: str) -> dict[str, Any] | None:
+    entry = _url_cache.get(url)
+    if entry is None:
+        return None
+    ts, result = entry
+    if time.time() - ts > _URL_CACHE_TTL:
+        del _url_cache[url]
+        return None
+    logger.info("Cache hit for %s", url)
+    return result
 
 
-def format_tool_search_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Return a compact, model-friendly shape from raw SearXNG results."""
-    formatted: list[dict[str, Any]] = []
-    for result in results:
-        formatted.append(
-            {
-                "title": (result.get("title") or "").strip(),
-                "url": (result.get("url") or "").strip(),
-                "snippet": (result.get("content") or "").strip(),
-                "engines": result.get("engines")
-                if isinstance(result.get("engines"), list)
-                else [],
-            }
-        )
-    return formatted
+def _set_cached(url: str, result: dict[str, Any]) -> None:
+    _url_cache[url] = (time.time(), result)
 
 
-def run_web_search_tool(arguments: dict[str, Any]) -> dict[str, Any]:
-    """Execute the web_search tool against local SearXNG and return structured JSON."""
-    query = str(arguments.get("query") or "").strip()
-    categories = (
-        arguments.get("categories")
-        if isinstance(arguments.get("categories"), list)
-        else None
-    )
-    time_range = (
-        arguments.get("time_range")
-        if isinstance(arguments.get("time_range"), str)
-        else None
-    )
-    language = (
-        arguments.get("language")
-        if isinstance(arguments.get("language"), str)
-        else None
-    )
-    pageno = (
-        arguments.get("pageno") if isinstance(arguments.get("pageno"), int) else 1
-    )
-    max_results = (
-        arguments.get("max_results")
-        if isinstance(arguments.get("max_results"), int)
-        else None
-    )
-
-    if not query:
-        return {"error": "query is required"}
-
-    results = fetch_searxng_results(
-        query,
-        categories=categories,
-        time_range=time_range,
-        pageno=pageno,
-        language=language,
-        max_results=max_results,
-    )
-    return {
-        "query": query,
-        "result_count": len(results),
-        "results": format_tool_search_results(results),
-    }
-
-
-# ── HTML helpers ─────────────────────────────────────────────────────────
+def _validate_url(url: str) -> str | None:
+    """Return an error string if the URL is invalid, or None if OK."""
+    if not url:
+        return "url is required"
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return "url must start with http:// or https://"
+    return None
 
 
 def truncate_text(text: str, max_chars: int) -> tuple[str, bool]:
+    """Truncate text to max_chars. Returns (text, was_truncated)."""
     if len(text) <= max_chars:
         return text, False
     return text[:max_chars], True
 
 
-def extract_links_from_html(html: str, base_url: str) -> list[str]:
-    links: list[str] = []
-    for match in re.finditer(
-        r"""(?is)<a\b[^>]*\bhref\s*=\s*["']([^"']+)["']""", html
-    ):
-        raw_href = unescape((match.group(1) or "").strip())
-        if not raw_href or raw_href.startswith(("#", "javascript:", "mailto:", "tel:")):
-            continue
-        resolved = urljoin(base_url, raw_href)
-        parsed = urlparse(resolved)
-        if parsed.scheme in {"http", "https"}:
-            links.append(resolved)
-            if len(links) >= 25:
-                break
-    return list(dict.fromkeys(links))
+# ─────────────────────────────────────────────────────────────────────────
+# HTML parsing
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def extract_title_from_html(html: str) -> str:
+    """Extract the <title> text from an HTML document."""
+    match = re.search(r"(?is)<title[^>]*>(.*?)</title>", html)
+    if not match:
+        return ""
+    title = unescape(match.group(1))
+    return re.sub(r"\s+", " ", title).strip()
 
 
 def simple_html_to_text(html: str) -> str:
+    """Regex-based fallback: strip tags and collapse whitespace."""
     text = re.sub(r"(?is)<(script|style|noscript).*?>.*?</\1>", " ", html)
     text = re.sub(r"(?i)<br\s*/?>", "\n", text)
     text = re.sub(
-        r"(?i)</(p|div|li|h[1-6]|tr|section|article|ul|ol|table|blockquote)>", "\n", text
+        r"(?i)</(p|div|li|h[1-6]|tr|section|article|ul|ol|table|blockquote)>",
+        "\n",
+        text,
     )
     text = re.sub(r"(?s)<[^>]+>", " ", text)
     text = unescape(text)
@@ -168,17 +103,13 @@ def simple_html_to_text(html: str) -> str:
     return text.strip()
 
 
-def extract_title_from_html(html: str) -> str:
-    match = re.search(r"(?is)<title[^>]*>(.*?)</title>", html)
-    if not match:
-        return ""
-    title = unescape(match.group(1))
-    title = re.sub(r"\s+", " ", title).strip()
-    return title
-
-
 def extract_readable_text(html: str, url: str) -> tuple[str, str]:
+    """
+    Extract (title, readable_text) from HTML.
+    Uses trafilatura when available, falls back to regex stripping.
+    """
     title = extract_title_from_html(html)
+
     if trafilatura is not None:
         extracted_text = ""
         try:
@@ -210,28 +141,237 @@ def extract_readable_text(html: str, url: str) -> tuple[str, str]:
 
         if extracted_text:
             return title, extracted_text
+
     return title, simple_html_to_text(html)
 
 
-# ── URL fetching ─────────────────────────────────────────────────────────
+def extract_links_from_html(html: str, base_url: str) -> list[str]:
+    """Extract up to 25 unique absolute http(s) links from HTML."""
+    links: list[str] = []
+    for match in re.finditer(
+        r"""(?is)<a\b[^>]*\bhref\s*=\s*["']([^"']+)["']""", html
+    ):
+        raw_href = unescape((match.group(1) or "").strip())
+        if not raw_href or raw_href.startswith(("#", "javascript:", "mailto:", "tel:")):
+            continue
+        resolved = urljoin(base_url, raw_href)
+        parsed = urlparse(resolved)
+        if parsed.scheme in {"http", "https"}:
+            links.append(resolved)
+            if len(links) >= 25:
+                break
+    return list(dict.fromkeys(links))
 
 
-def fetch_url_with_requests(url: str) -> dict[str, Any]:
+def _detect_content_type(
+    content_type_header: str, body_text: str
+) -> tuple[bool, bool]:
+    """Return (is_html, is_textual) based on Content-Type and body sniffing."""
+    ct = content_type_header.lower()
+    is_html = "html" in ct or "<html" in body_text[:2000].lower()
+    is_textual = is_html or ct.startswith("text/") or any(
+        marker in ct for marker in ("json", "xml", "javascript")
+    )
+    return is_html, is_textual
+
+
+def _format_json_if_applicable(content_type: str, body: str) -> str | None:
+    """If the response is JSON, return a pretty-printed version."""
+    if "json" not in content_type.lower():
+        return None
+    try:
+        parsed = json.loads(body)
+        return json.dumps(parsed, indent=2, ensure_ascii=False)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 1. web_search – SearXNG
+# ─────────────────────────────────────────────────────────────────────────
+
+SEARXNG_MAX_RETRIES = 2
+SEARXNG_RETRY_DELAY = 1  # seconds
+
+
+def _fetch_searxng(
+    query: str,
+    *,
+    categories: list[str] | None = None,
+    time_range: str | None = None,
+    pageno: int = 1,
+    language: str | None = None,
+    max_results: int | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Query SearXNG with automatic retry on transient failures.
+    Returns raw result dicts from the SearXNG JSON API, or [].
+    """
+    if not SEARXNG_BASE_URL or not query:
+        return []
+
+    search_url = f"{SEARXNG_BASE_URL}/search"
+    params: dict[str, Any] = {
+        "q": query,
+        "format": "json",
+        "language": language or "en-US",
+        "pageno": max(pageno, 1),
+    }
+    if categories:
+        params["categories"] = ",".join(categories)
+    if time_range in {"day", "month", "year"}:
+        params["time_range"] = time_range
+
+    last_exc: Exception | None = None
+    for attempt in range(1, SEARXNG_MAX_RETRIES + 2):
+        try:
+            resp = requests.get(
+                search_url, params=params, timeout=10, verify=False
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            results = payload.get("results", [])
+            if not isinstance(results, list):
+                return []
+            cap = max_results if isinstance(max_results, int) else 5
+            return results[: max(cap, 0)]
+        except Exception as exc:
+            last_exc = exc
+            if attempt <= SEARXNG_MAX_RETRIES:
+                logger.warning(
+                    "SearXNG search attempt %d/%d failed: %s – retrying in %ds",
+                    attempt,
+                    SEARXNG_MAX_RETRIES + 1,
+                    exc,
+                    SEARXNG_RETRY_DELAY,
+                )
+                time.sleep(SEARXNG_RETRY_DELAY)
+
+    logger.warning("SearXNG search failed after %d attempts: %s", SEARXNG_MAX_RETRIES + 1, last_exc)
+    return []
+
+
+def _deduplicate_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove duplicate results by URL, merging engine lists."""
+    seen: dict[str, dict[str, Any]] = {}
+    for r in results:
+        url = (r.get("url") or "").strip()
+        if not url:
+            continue
+        if url in seen:
+            # Merge engines from the duplicate into the first occurrence
+            existing_engines = seen[url].get("engines", [])
+            new_engines = r.get("engines", [])
+            if isinstance(new_engines, list):
+                merged = list(dict.fromkeys(existing_engines + new_engines))
+                seen[url]["engines"] = merged
+        else:
+            seen[url] = r
+    return list(seen.values())
+
+
+def _format_search_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Shape raw SearXNG results into a compact, model-friendly format."""
+    formatted: list[dict[str, Any]] = []
+    for r in results:
+        entry: dict[str, Any] = {
+            "title": (r.get("title") or "").strip(),
+            "url": (r.get("url") or "").strip(),
+            "snippet": (r.get("content") or "").strip(),
+            "engines": r.get("engines")
+            if isinstance(r.get("engines"), list)
+            else [],
+        }
+        # Include published_date when available (helps LLM judge recency)
+        pub_date = r.get("publishedDate") or r.get("published_date") or ""
+        if isinstance(pub_date, str) and pub_date.strip():
+            entry["published_date"] = pub_date.strip()
+        formatted.append(entry)
+    return formatted
+
+# Keep old name as alias so existing tests still work
+format_tool_search_results = _format_search_results
+
+
+def run_web_search_tool(arguments: dict[str, Any]) -> dict[str, Any]:
+    """
+    Execute the web_search tool: query SearXNG, deduplicate, and return
+    structured results.
+    """
+    query = str(arguments.get("query") or "").strip()
+    if not query:
+        return {"error": "query is required"}
+
+    categories = (
+        arguments.get("categories")
+        if isinstance(arguments.get("categories"), list)
+        else None
+    )
+    time_range = (
+        arguments.get("time_range")
+        if isinstance(arguments.get("time_range"), str)
+        else None
+    )
+    language = (
+        arguments.get("language")
+        if isinstance(arguments.get("language"), str)
+        else None
+    )
+    pageno = (
+        arguments.get("pageno") if isinstance(arguments.get("pageno"), int) else 1
+    )
+    max_results = (
+        arguments.get("max_results")
+        if isinstance(arguments.get("max_results"), int)
+        else None
+    )
+
+    raw_results = _fetch_searxng(
+        query,
+        categories=categories,
+        time_range=time_range,
+        pageno=pageno,
+        language=language,
+        max_results=max_results,
+    )
+    deduped = _deduplicate_results(raw_results)
+    formatted = _format_search_results(deduped)
+
+    return {
+        "query": query,
+        "result_count": len(formatted),
+        "results": formatted,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 2. web_fetch – lightweight HTTP GET
+# ─────────────────────────────────────────────────────────────────────────
+
+MAX_FETCH_BYTES = 1_500_000  # ~1.5 MB cap on response body
+DEFAULT_MAX_CHARS = 20_000
+
+
+def _http_get(url: str) -> dict[str, Any]:
+    """
+    Perform a plain HTTP GET and return raw response metadata.
+    Returns a dict with either an "error" key or response fields.
+    """
     try:
         resp = requests.get(
             url,
-            timeout=12,
+            timeout=15,
             headers={"User-Agent": URL_TOOL_USER_AGENT},
             allow_redirects=True,
         )
         resp.raise_for_status()
     except Exception as exc:
-        return {"error": f"fetch_failed: {exc}"}
+        return {"error": f"HTTP request failed: {exc}"}
 
     raw = resp.content or b""
-    bytes_truncated = len(raw) > 1_500_000
+    bytes_truncated = len(raw) > MAX_FETCH_BYTES
     if bytes_truncated:
-        raw = raw[:1_500_000]
+        raw = raw[:MAX_FETCH_BYTES]
 
     content_type = (resp.headers.get("content-type") or "").lower()
     encoding = resp.encoding or "utf-8"
@@ -240,177 +380,207 @@ def fetch_url_with_requests(url: str) -> dict[str, Any]:
     except LookupError:
         body_text = raw.decode("utf-8", errors="replace")
 
-    is_html = "html" in content_type or "<html" in body_text[:2000].lower()
-    is_textual = is_html or content_type.startswith("text/") or any(
-        marker in content_type for marker in ("json", "xml", "javascript")
-    )
-    if not is_textual:
-        body_text = ""
+    is_html, is_textual = _detect_content_type(content_type, body_text)
 
     return {
         "status_code": resp.status_code,
-        "final_url": resp.url,
+        "final_url": str(resp.url),
         "content_type": content_type,
-        "body_text": body_text,
+        "body_text": body_text if is_textual else "",
         "is_html": is_html,
         "is_textual": is_textual,
         "bytes_truncated": bytes_truncated,
     }
 
 
-def fetch_url_with_playwright(url: str) -> dict[str, Any]:
+def run_web_fetch_tool(arguments: dict[str, Any]) -> dict[str, Any]:
+    """
+    Lightweight URL fetch via HTTP GET.
+
+    Fetches the page, extracts readable text (using trafilatura when
+    available), and returns structured metadata. No JavaScript execution.
+    Good for articles, docs, APIs, and any page that doesn't require
+    client-side rendering.
+    """
+    url = str(arguments.get("url") or "").strip()
+    url_error = _validate_url(url)
+    if url_error:
+        return {"error": url_error}
+
+    include_links = arguments.get("include_links", True)
+    if not isinstance(include_links, bool):
+        include_links = True
+
+    max_chars = arguments.get("max_chars")
+    if not isinstance(max_chars, int):
+        max_chars = DEFAULT_MAX_CHARS
+    max_chars = max(500, min(max_chars, DEFAULT_MAX_CHARS))
+
+    # Check cache
+    cache_key = f"fetch:{url}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        # Re-truncate to the requested max_chars (may differ from cached call)
+        text = cached.get("_full_text", cached.get("text", ""))
+        excerpt, was_truncated = truncate_text(text, max_chars)
+        result = {**cached, "text": excerpt, "text_truncated": was_truncated}
+        result.pop("_full_text", None)
+        return result
+
+    raw = _http_get(url)
+    if "error" in raw:
+        return {"url": url, "error": raw["error"]}
+
+    body_text = raw["body_text"]
+    final_url = raw["final_url"]
+    content_type = raw["content_type"]
+    is_html = raw["is_html"]
+
+    # JSON responses: pretty-print instead of extracting "readable text"
+    pretty_json = _format_json_if_applicable(content_type, body_text)
+    if pretty_json is not None:
+        text = pretty_json
+        title = ""
+        links: list[str] = []
+    elif is_html:
+        title, text = extract_readable_text(body_text, final_url)
+        links = extract_links_from_html(body_text, final_url) if include_links else []
+    else:
+        title = ""
+        text = body_text.strip()
+        links = []
+
+    excerpt, text_truncated = truncate_text(text, max_chars)
+
+    result: dict[str, Any] = {
+        "url": url,
+        "final_url": final_url,
+        "status_code": raw["status_code"],
+        "content_type": content_type,
+        "title": title,
+        "text": excerpt,
+        "text_length": len(text),
+        "text_truncated": text_truncated,
+        "bytes_truncated": raw["bytes_truncated"],
+    }
+    if include_links and links:
+        result["links"] = links
+
+    # Cache with full text so future calls with different max_chars still work
+    _set_cached(cache_key, {**result, "_full_text": text})
+
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 3. web_render – Playwright browser render
+# ─────────────────────────────────────────────────────────────────────────
+
+DEFAULT_RENDER_MAX_CHARS = 20_000
+
+
+def run_web_render_tool(arguments: dict[str, Any]) -> dict[str, Any]:
+    """
+    Render a URL in a headless Chromium browser via Playwright and return
+    the fully-rendered page text.
+
+    Use this for JavaScript-heavy pages (SPAs, Twitter/X, Reddit, etc.),
+    pages that returned little or no content from web_fetch, or sites that
+    block simple HTTP requests. This is slower and more resource-intensive
+    than web_fetch — prefer web_fetch for most URLs.
+    """
+    url = str(arguments.get("url") or "").strip()
+    url_error = _validate_url(url)
+    if url_error:
+        return {"error": url_error}
+
+    include_links = arguments.get("include_links", True)
+    if not isinstance(include_links, bool):
+        include_links = True
+
+    max_chars = arguments.get("max_chars")
+    if not isinstance(max_chars, int):
+        max_chars = DEFAULT_RENDER_MAX_CHARS
+    max_chars = max(500, min(max_chars, DEFAULT_RENDER_MAX_CHARS))
+
+    wait_seconds = arguments.get("wait_seconds")
+    if not isinstance(wait_seconds, (int, float)) or wait_seconds < 0:
+        wait_seconds = 0
+    wait_seconds = min(wait_seconds, 10)
+
+    # Check cache
+    cache_key = f"render:{url}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        text = cached.get("_full_text", cached.get("text", ""))
+        excerpt, was_truncated = truncate_text(text, max_chars)
+        result = {**cached, "text": excerpt, "text_truncated": was_truncated}
+        result.pop("_full_text", None)
+        return result
+
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        return {"error": "playwright_not_installed"}
+        return {
+            "url": url,
+            "error": "playwright is not installed. Run: pip install playwright && playwright install chromium",
+        }
 
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)
             page = browser.new_page(user_agent=URL_TOOL_USER_AGENT)
-            response = page.goto(url, wait_until="networkidle", timeout=20_000)
+            response = page.goto(url, wait_until="networkidle", timeout=30_000)
+
+            if wait_seconds > 0:
+                page.wait_for_timeout(int(wait_seconds * 1000))
+
             html = page.content()
             final_url = page.url
-            status = response.status if response is not None else None
-            content_type = "text/html; charset=utf-8"
+            status_code = response.status if response is not None else None
             browser.close()
     except Exception as exc:
-        return {"error": f"render_failed: {exc}"}
+        return {"url": url, "error": f"Browser render failed: {exc}"}
 
-    return {
-        "status_code": status,
+    title, text = extract_readable_text(html, final_url)
+    links = extract_links_from_html(html, final_url) if include_links else []
+
+    excerpt, text_truncated = truncate_text(text, max_chars)
+
+    result: dict[str, Any] = {
+        "url": url,
         "final_url": final_url,
-        "content_type": content_type,
-        "body_text": html,
-        "is_html": True,
-        "bytes_truncated": False,
-    }
-
-
-def should_use_render_fallback(fetch_result: dict[str, Any]) -> bool:
-    if not fetch_result.get("is_html"):
-        return False
-    text = str(fetch_result.get("extracted_text") or "")
-    return len(text.strip()) < 500
-
-
-def normalize_open_mode(mode: Any) -> str:
-    if not isinstance(mode, str):
-        return "auto"
-    mode = mode.strip().lower()
-    if mode in {"auto", "fetch", "rendered"}:
-        return mode
-    return "auto"
-
-
-def postprocess_open_result(
-    result: dict[str, Any], *, include_links: bool, max_chars: int
-) -> dict[str, Any]:
-    body_text = str(result.get("body_text") or "")
-    is_html = bool(result.get("is_html"))
-    final_url = str(result.get("final_url") or "")
-
-    if is_html:
-        title, extracted_text = extract_readable_text(body_text, final_url)
-        links = extract_links_from_html(body_text, final_url) if include_links else []
-    else:
-        title = ""
-        extracted_text = body_text.strip()
-        links = []
-
-    text_excerpt, text_truncated = truncate_text(extracted_text, max_chars)
-    output = {
-        "status_code": result.get("status_code"),
-        "final_url": final_url,
-        "content_type": result.get("content_type"),
+        "status_code": status_code,
         "title": title,
-        "text": text_excerpt,
-        "text_length": len(extracted_text),
+        "text": excerpt,
+        "text_length": len(text),
         "text_truncated": text_truncated,
-        "bytes_truncated": bool(result.get("bytes_truncated")),
-        "links": links,
     }
-    output["extracted_text"] = extracted_text
-    return output
+    if include_links and links:
+        result["links"] = links
+
+    _set_cached(cache_key, {**result, "_full_text": text})
+
+    return result
 
 
-def run_web_open_url_tool(arguments: dict[str, Any]) -> dict[str, Any]:
-    url = str(arguments.get("url") or "").strip()
-    mode = normalize_open_mode(arguments.get("mode"))
-    include_links_raw = arguments.get("include_links", True)
-    include_links = include_links_raw if isinstance(include_links_raw, bool) else True
-    max_chars = arguments.get("max_chars")
-    if not isinstance(max_chars, int):
-        max_chars = 12000
-    max_chars = max(500, min(max_chars, 12000))
-
-    if not url:
-        return {"error": "url is required"}
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"}:
-        return {"error": "url must start with http:// or https://"}
-
-    fetch_result: dict[str, Any] | None = None
-    rendered_result: dict[str, Any] | None = None
-    notes: list[str] = []
-
-    if mode in {"auto", "fetch"}:
-        raw = fetch_url_with_requests(url)
-        if "error" in raw:
-            if mode == "fetch":
-                return {"url": url, "mode_used": "fetch", "error": raw["error"]}
-            notes.append(f"fetch_failed: {raw['error']}")
-        else:
-            fetch_result = postprocess_open_result(
-                raw, include_links=include_links, max_chars=max_chars
-            )
-            if mode == "fetch":
-                fetch_result.pop("extracted_text", None)
-                fetch_result["url"] = url
-                fetch_result["mode_used"] = "fetch"
-                return fetch_result
-
-    if mode in {"auto", "rendered"}:
-        should_render = mode == "rendered" or (
-            fetch_result is None or should_use_render_fallback(fetch_result)
-        )
-        if should_render:
-            raw_rendered = fetch_url_with_playwright(url)
-            if "error" in raw_rendered:
-                notes.append(str(raw_rendered["error"]))
-            else:
-                rendered_result = postprocess_open_result(
-                    raw_rendered, include_links=include_links, max_chars=max_chars
-                )
-
-    if rendered_result is not None:
-        rendered_result.pop("extracted_text", None)
-        rendered_result["url"] = url
-        rendered_result["mode_used"] = "rendered"
-        rendered_result["notes"] = notes
-        return rendered_result
-
-    if fetch_result is not None:
-        fetch_result.pop("extracted_text", None)
-        fetch_result["url"] = url
-        fetch_result["mode_used"] = "fetch"
-        fetch_result["notes"] = notes
-        return fetch_result
-
-    return {"url": url, "mode_used": mode, "error": "unable_to_open_url", "notes": notes}
-
-
-# ── Tool-result summary (for logging) ───────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────
+# Tool-result summaries (for logging)
+# ─────────────────────────────────────────────────────────────────────────
 
 
 def summarize_tool_result(tool_name: str, result: dict[str, Any]) -> str:
+    """Return a concise one-line summary of a tool result for logging."""
     if tool_name == "web_search":
-        return f"result_count={result.get('result_count', 0)} query={result.get('query', '')!r}"
-    if tool_name == "web_open_url":
         return (
-            f"mode={result.get('mode_used')} status={result.get('status_code')} "
-            f"text_length={result.get('text_length')} error={result.get('error')}"
+            f"result_count={result.get('result_count', 0)} "
+            f"query={result.get('query', '')!r}"
         )
-    from llm import truncate_for_log
-
-    return truncate_for_log(json.dumps(result, ensure_ascii=False), max_chars=300)
+    if tool_name in {"web_fetch", "web_render"}:
+        return (
+            f"status={result.get('status_code')} "
+            f"text_length={result.get('text_length')} "
+            f"title={result.get('title', '')!r} "
+            f"error={result.get('error')}"
+        )
+    return json.dumps(result, ensure_ascii=False)[:300]
