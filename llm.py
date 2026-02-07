@@ -17,7 +17,12 @@ from config import (
     TRIGGER,
     client,
 )
-from tools import run_web_open_url_tool, run_web_search_tool, summarize_tool_result
+from tools import (
+    run_web_fetch_tool,
+    run_web_render_tool,
+    run_web_search_tool,
+    summarize_tool_result,
+)
 from transcript import build_thread_transcript
 
 import praw.models
@@ -114,13 +119,18 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": "Search the web using the local SearXNG instance.",
+            "description": (
+                "Search the web using a SearXNG metasearch engine. Returns a list of "
+                "results with title, URL, snippet, source engines, and (when available) "
+                "published date. Use this to find relevant pages before reading them "
+                "with web_fetch or web_render. Results are deduplicated by URL."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search query string.",
+                        "description": "The search query. Be specific and include key terms for best results.",
                     },
                     "categories": {
                         "type": "array",
@@ -139,27 +149,34 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                                 "social media",
                             ],
                         },
-                        "description": "Optional SearXNG categories list. Use only supported values.",
+                        "description": (
+                            "Limit search to specific SearXNG categories. "
+                            "Use 'news' for current events, 'science' for papers, "
+                            "'it' for technical topics, etc. Omit for general web search."
+                        ),
                     },
                     "time_range": {
                         "type": "string",
                         "enum": ["day", "month", "year"],
-                        "description": "Optional recency filter.",
+                        "description": (
+                            "Filter results by recency. Use 'day' for breaking news, "
+                            "'month' for recent developments, 'year' for the past year."
+                        ),
                     },
                     "language": {
                         "type": "string",
-                        "description": "Optional language code like en-US.",
+                        "description": "Language code (e.g. 'en-US', 'de-DE'). Defaults to en-US.",
                     },
                     "pageno": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Optional result page number.",
+                        "description": "Result page number for pagination. Defaults to 1.",
                     },
                     "max_results": {
                         "type": "integer",
                         "minimum": 1,
                         "maximum": 10,
-                        "description": "Result cap.",
+                        "description": "Maximum number of results to return. Defaults to 5.",
                     },
                 },
                 "required": ["query"],
@@ -170,29 +187,86 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
-            "name": "web_open_url",
-            "description": "Open a URL and return readable page text. Use mode='auto' by default.",
+            "name": "web_fetch",
+            "description": (
+                "Fetch a URL using a lightweight HTTP GET request and return the "
+                "extracted readable text, title, and metadata. No JavaScript execution. "
+                "This is fast and cheap — use it as your DEFAULT tool for reading web "
+                "pages, articles, documentation, API responses, and any URL that "
+                "doesn't require client-side rendering. For JSON API endpoints, the "
+                "response is automatically pretty-printed. If the page returns little "
+                "or no content (common with SPAs and JS-heavy sites), follow up with "
+                "web_render instead."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "url": {
                         "type": "string",
-                        "description": "Absolute URL to open (http or https).",
-                    },
-                    "mode": {
-                        "type": "string",
-                        "enum": ["auto", "fetch", "rendered"],
-                        "description": "auto: fetch first then render fallback. fetch: HTTP only. rendered: force browser render.",
+                        "description": "The absolute URL to fetch (http:// or https://).",
                     },
                     "include_links": {
                         "type": "boolean",
-                        "description": "Whether to include extracted links.",
+                        "description": (
+                            "Whether to extract and return links found on the page. "
+                            "Defaults to true. Set to false to reduce response size."
+                        ),
                     },
                     "max_chars": {
                         "type": "integer",
                         "minimum": 500,
-                        "maximum": 12000,
-                        "description": "Maximum number of content characters to return.",
+                        "maximum": 20000,
+                        "description": (
+                            "Maximum characters of page text to return. Defaults to "
+                            "20000. Use a smaller value when you only need a summary."
+                        ),
+                    },
+                },
+                "required": ["url"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_render",
+            "description": (
+                "Render a URL in a headless Chromium browser and return the "
+                "fully-rendered page text. Use this ONLY when web_fetch returned "
+                "little or no content, or for known JavaScript-heavy sites like "
+                "Twitter/X, Reddit, single-page applications, or pages that block "
+                "simple HTTP requests. This is slower and more resource-intensive "
+                "than web_fetch — always try web_fetch first."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The absolute URL to render (http:// or https://).",
+                    },
+                    "include_links": {
+                        "type": "boolean",
+                        "description": (
+                            "Whether to extract and return links found on the rendered page. "
+                            "Defaults to true."
+                        ),
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 500,
+                        "maximum": 20000,
+                        "description": "Maximum characters of page text to return. Defaults to 20000.",
+                    },
+                    "wait_seconds": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 10,
+                        "description": (
+                            "Extra seconds to wait after the page loads (for lazy-loaded "
+                            "content). Defaults to 0. Use 2-5 for pages with delayed rendering."
+                        ),
                     },
                 },
                 "required": ["url"],
@@ -208,12 +282,13 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 
 def _execute_tool(tool_name: str, parsed_args: dict[str, Any]) -> dict[str, Any]:
     """Dispatch a tool call by name and return the result dict."""
+    logger.info("Tool call: %s(%s)", tool_name, parsed_args)
     if tool_name == "web_search":
-        logger.info("Tool call: web_search(%s)", parsed_args)
         return run_web_search_tool(parsed_args)
-    if tool_name == "web_open_url":
-        logger.info("Tool call: web_open_url(%s)", parsed_args)
-        return run_web_open_url_tool(parsed_args)
+    if tool_name == "web_fetch":
+        return run_web_fetch_tool(parsed_args)
+    if tool_name == "web_render":
+        return run_web_render_tool(parsed_args)
     return {"error": f"Unknown tool: {tool_name}"}
 
 

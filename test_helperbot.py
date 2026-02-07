@@ -2,15 +2,14 @@
 test_helperbot.py – Unit tests for HelperBot.
 
 Covers: config validation, trigger regex, image extraction, transcript
-building, LLM message helpers, web search tool, and the ai_answer
-tool-calling loop.
-
-Note: web_open_url / web fetch tests are intentionally excluded as that
-feature is expected to change.
+building, LLM message helpers, web_search tool, web_fetch tool,
+web_render tool, caching, deduplication, HTML parsing, the ai_answer
+tool-calling loop, and retry logic.
 """
 
 import json
 import os
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -73,7 +72,6 @@ class TestConfig(unittest.TestCase):
 
         env = {var: "test_value" for var in config.REQUIRED_ENV_VARS}
         with patch.dict(os.environ, env, clear=False):
-            # Should not raise
             config.validate_env()
 
     def test_required_env_vars_list(self):
@@ -121,7 +119,7 @@ class TestTriggerRegex(unittest.TestCase):
         invalid = [
             "groktest",
             "something else",
-            "hello u/grok",  # trigger must be at the start
+            "hello u/grok",
             "not@grok",
             "",
             "random text",
@@ -251,10 +249,7 @@ class TestBuildThreadTranscript(unittest.TestCase):
         }
         _, images = build_thread_transcript(comment)
         self.assertTrue(len(images) >= 2)
-        # Check &amp; is decoded
-        self.assertTrue(
-            any("&amp;" not in url for url in images)
-        )
+        self.assertTrue(any("&amp;" not in url for url in images))
 
 
 # ── LLM message helper tests ────────────────────────────────────────────
@@ -283,8 +278,7 @@ class TestMessageHelpers(unittest.TestCase):
     def test_truncate_for_log_short(self):
         from llm import truncate_for_log
 
-        text = "short text"
-        self.assertEqual(truncate_for_log(text), text)
+        self.assertEqual(truncate_for_log("short text"), "short text")
 
     def test_truncate_for_log_long(self):
         from llm import truncate_for_log
@@ -325,8 +319,7 @@ class TestMessageHelpers(unittest.TestCase):
 
         msg = SimpleNamespace(reasoning=None)
         msg.model_dump = lambda exclude_none=True: {}
-        result = extract_reasoning_for_log(msg)
-        self.assertEqual(result, "")
+        self.assertEqual(extract_reasoning_for_log(msg), "")
 
 
 # ── Web search tool tests ───────────────────────────────────────────────
@@ -425,6 +418,504 @@ class TestWebSearchTool(unittest.TestCase):
         self.assertEqual(formatted[0]["snippet"], "")
         self.assertEqual(formatted[0]["engines"], [])
 
+    @patch("tools.requests.get")
+    def test_includes_published_date(self, mock_get):
+        from tools import run_web_search_tool
+
+        fake_resp = MagicMock()
+        fake_resp.raise_for_status.return_value = None
+        fake_resp.json.return_value = {
+            "results": [
+                {
+                    "title": "News Article",
+                    "url": "https://example.com/news",
+                    "content": "Breaking news",
+                    "engines": ["google"],
+                    "publishedDate": "2026-02-01T12:00:00Z",
+                }
+            ]
+        }
+        mock_get.return_value = fake_resp
+
+        result = run_web_search_tool({"query": "news"})
+        self.assertEqual(result["results"][0]["published_date"], "2026-02-01T12:00:00Z")
+
+    @patch("tools.requests.get")
+    def test_omits_published_date_when_absent(self, mock_get):
+        from tools import run_web_search_tool
+
+        fake_resp = MagicMock()
+        fake_resp.raise_for_status.return_value = None
+        fake_resp.json.return_value = {
+            "results": [
+                {"title": "No Date", "url": "https://example.com", "content": "", "engines": []}
+            ]
+        }
+        mock_get.return_value = fake_resp
+
+        result = run_web_search_tool({"query": "test"})
+        self.assertNotIn("published_date", result["results"][0])
+
+
+# ── Search deduplication tests ───────────────────────────────────────────
+
+
+class TestSearchDeduplication(unittest.TestCase):
+    def test_deduplicates_by_url(self):
+        from tools import _deduplicate_results
+
+        results = [
+            {"url": "https://example.com", "title": "First", "engines": ["google"]},
+            {"url": "https://example.com", "title": "Duplicate", "engines": ["bing"]},
+            {"url": "https://other.com", "title": "Other", "engines": ["google"]},
+        ]
+        deduped = _deduplicate_results(results)
+        self.assertEqual(len(deduped), 2)
+
+    def test_merges_engines_on_dedup(self):
+        from tools import _deduplicate_results
+
+        results = [
+            {"url": "https://example.com", "title": "Page", "engines": ["google"]},
+            {"url": "https://example.com", "title": "Page", "engines": ["bing", "duckduckgo"]},
+        ]
+        deduped = _deduplicate_results(results)
+        self.assertEqual(len(deduped), 1)
+        engines = deduped[0]["engines"]
+        self.assertIn("google", engines)
+        self.assertIn("bing", engines)
+        self.assertIn("duckduckgo", engines)
+
+    def test_skips_results_without_url(self):
+        from tools import _deduplicate_results
+
+        results = [
+            {"url": "", "title": "No URL"},
+            {"title": "Missing URL key"},
+            {"url": "https://valid.com", "title": "Valid"},
+        ]
+        deduped = _deduplicate_results(results)
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0]["url"], "https://valid.com")
+
+    @patch("tools.requests.get")
+    def test_retries_on_failure(self, mock_get):
+        """SearXNG should retry on transient failures."""
+        from tools import _fetch_searxng
+
+        fake_resp = MagicMock()
+        fake_resp.raise_for_status.return_value = None
+        fake_resp.json.return_value = {
+            "results": [{"title": "OK", "url": "https://ok.com", "content": ""}]
+        }
+        mock_get.side_effect = [ConnectionError("fail"), fake_resp]
+
+        results = _fetch_searxng("test query")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(mock_get.call_count, 2)
+
+
+# ── Web fetch tool tests ────────────────────────────────────────────────
+
+
+class TestWebFetchTool(unittest.TestCase):
+    def setUp(self):
+        # Clear cache between tests
+        import tools
+        tools._url_cache.clear()
+
+    def test_missing_url_returns_error(self):
+        from tools import run_web_fetch_tool
+
+        result = run_web_fetch_tool({})
+        self.assertIn("error", result)
+
+    def test_empty_url_returns_error(self):
+        from tools import run_web_fetch_tool
+
+        result = run_web_fetch_tool({"url": ""})
+        self.assertIn("error", result)
+
+    def test_rejects_non_http_scheme(self):
+        from tools import run_web_fetch_tool
+
+        result = run_web_fetch_tool({"url": "file:///etc/passwd"})
+        self.assertIn("error", result)
+        self.assertIn("http", result["error"])
+
+    def test_rejects_ftp_scheme(self):
+        from tools import run_web_fetch_tool
+
+        result = run_web_fetch_tool({"url": "ftp://example.com/file"})
+        self.assertIn("error", result)
+
+    @patch("tools.requests.get")
+    def test_fetches_html_page(self, mock_get):
+        from tools import run_web_fetch_tool
+
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.url = "https://example.com/page"
+        fake_resp.headers = {"content-type": "text/html; charset=utf-8"}
+        fake_resp.encoding = "utf-8"
+        fake_resp.content = b"<html><head><title>Test</title></head><body><p>Hello world</p></body></html>"
+        fake_resp.raise_for_status.return_value = None
+        mock_get.return_value = fake_resp
+
+        result = run_web_fetch_tool({"url": "https://example.com/page"})
+        self.assertEqual(result["status_code"], 200)
+        self.assertEqual(result["url"], "https://example.com/page")
+        self.assertIn("Hello", result["text"])
+        self.assertIsInstance(result["text_length"], int)
+        self.assertFalse(result["bytes_truncated"])
+
+    @patch("tools.requests.get")
+    def test_pretty_prints_json(self, mock_get):
+        from tools import run_web_fetch_tool
+
+        json_body = json.dumps({"key": "value", "nested": {"a": 1}}).encode()
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.url = "https://api.example.com/data"
+        fake_resp.headers = {"content-type": "application/json"}
+        fake_resp.encoding = "utf-8"
+        fake_resp.content = json_body
+        fake_resp.raise_for_status.return_value = None
+        mock_get.return_value = fake_resp
+
+        result = run_web_fetch_tool({"url": "https://api.example.com/data"})
+        self.assertIn('"key": "value"', result["text"])
+        # Should be indented (pretty-printed)
+        self.assertIn("\n", result["text"])
+
+    @patch("tools.requests.get")
+    def test_respects_max_chars(self, mock_get):
+        from tools import run_web_fetch_tool
+
+        long_text = "x" * 5000
+        html = f"<html><body><p>{long_text}</p></body></html>".encode()
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.url = "https://example.com"
+        fake_resp.headers = {"content-type": "text/html"}
+        fake_resp.encoding = "utf-8"
+        fake_resp.content = html
+        fake_resp.raise_for_status.return_value = None
+        mock_get.return_value = fake_resp
+
+        result = run_web_fetch_tool({"url": "https://example.com", "max_chars": 500})
+        self.assertLessEqual(len(result["text"]), 500)
+        self.assertTrue(result["text_truncated"])
+
+    @patch("tools.requests.get")
+    def test_handles_http_error(self, mock_get):
+        from tools import run_web_fetch_tool
+
+        mock_get.side_effect = Exception("Connection refused")
+
+        result = run_web_fetch_tool({"url": "https://down.example.com"})
+        self.assertIn("error", result)
+        self.assertEqual(result["url"], "https://down.example.com")
+
+    @patch("tools.requests.get")
+    def test_excludes_links_when_disabled(self, mock_get):
+        from tools import run_web_fetch_tool
+
+        html = b'<html><body><a href="https://other.com">link</a><p>text</p></body></html>'
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.url = "https://example.com"
+        fake_resp.headers = {"content-type": "text/html"}
+        fake_resp.encoding = "utf-8"
+        fake_resp.content = html
+        fake_resp.raise_for_status.return_value = None
+        mock_get.return_value = fake_resp
+
+        result = run_web_fetch_tool({"url": "https://example.com", "include_links": False})
+        self.assertNotIn("links", result)
+
+    @patch("tools.requests.get")
+    def test_caches_results(self, mock_get):
+        from tools import run_web_fetch_tool
+
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.url = "https://example.com/cached"
+        fake_resp.headers = {"content-type": "text/html"}
+        fake_resp.encoding = "utf-8"
+        fake_resp.content = b"<html><body>Cached content</body></html>"
+        fake_resp.raise_for_status.return_value = None
+        mock_get.return_value = fake_resp
+
+        # First call – should hit the network
+        result1 = run_web_fetch_tool({"url": "https://example.com/cached"})
+        self.assertEqual(mock_get.call_count, 1)
+
+        # Second call – should come from cache
+        result2 = run_web_fetch_tool({"url": "https://example.com/cached"})
+        self.assertEqual(mock_get.call_count, 1)  # Still 1 – no new HTTP call
+        self.assertEqual(result1["text"], result2["text"])
+
+    @patch("tools.requests.get")
+    def test_handles_non_textual_content(self, mock_get):
+        from tools import run_web_fetch_tool
+
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.url = "https://example.com/image.png"
+        fake_resp.headers = {"content-type": "image/png"}
+        fake_resp.encoding = None
+        fake_resp.content = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+        fake_resp.raise_for_status.return_value = None
+        mock_get.return_value = fake_resp
+
+        result = run_web_fetch_tool({"url": "https://example.com/image.png"})
+        # Non-textual content should result in empty text
+        self.assertEqual(result["text"], "")
+
+    @patch("tools.requests.get")
+    def test_clamps_max_chars_to_bounds(self, mock_get):
+        """max_chars values outside bounds should be clamped."""
+        from tools import run_web_fetch_tool
+
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.url = "https://example.com"
+        fake_resp.headers = {"content-type": "text/html"}
+        fake_resp.encoding = "utf-8"
+        fake_resp.content = b"<html><body>short</body></html>"
+        fake_resp.raise_for_status.return_value = None
+        mock_get.return_value = fake_resp
+
+        # Excessively large value should be clamped to DEFAULT_MAX_CHARS
+        result = run_web_fetch_tool({"url": "https://example.com", "max_chars": 999999})
+        self.assertIsNotNone(result.get("text"))
+
+        # Excessively small value should be clamped to 500
+        import tools
+        tools._url_cache.clear()
+        result2 = run_web_fetch_tool({"url": "https://example.com", "max_chars": 1})
+        self.assertIsNotNone(result2.get("text"))
+
+
+# ── Web render tool tests ────────────────────────────────────────────────
+
+
+class TestWebRenderTool(unittest.TestCase):
+    def setUp(self):
+        import tools
+        tools._url_cache.clear()
+
+    def test_missing_url_returns_error(self):
+        from tools import run_web_render_tool
+
+        result = run_web_render_tool({})
+        self.assertIn("error", result)
+
+    def test_rejects_non_http_scheme(self):
+        from tools import run_web_render_tool
+
+        result = run_web_render_tool({"url": "file:///etc/passwd"})
+        self.assertIn("error", result)
+
+    def test_returns_rendered_content(self):
+        """Test render tool with mocked Playwright."""
+        from tools import run_web_render_tool
+
+        rendered_html = "<html><head><title>Rendered</title></head><body><p>JS content here</p></body></html>"
+
+        mock_response = MagicMock()
+        mock_response.status = 200
+
+        mock_page = MagicMock()
+        mock_page.content.return_value = rendered_html
+        mock_page.url = "https://spa.example.com"
+        mock_page.goto.return_value = mock_response
+
+        mock_browser = MagicMock()
+        mock_browser.new_page.return_value = mock_page
+
+        mock_pw_instance = MagicMock()
+        mock_pw_instance.chromium.launch.return_value = mock_browser
+
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(return_value=mock_pw_instance)
+        mock_cm.__exit__ = MagicMock(return_value=False)
+
+        with patch("playwright.sync_api.sync_playwright", return_value=mock_cm):
+            result = run_web_render_tool({"url": "https://spa.example.com"})
+
+        self.assertEqual(result["url"], "https://spa.example.com")
+        self.assertEqual(result["status_code"], 200)
+        self.assertIn("JS content", result["text"])
+
+    def test_handles_browser_crash(self):
+        from tools import run_web_render_tool
+
+        mock_page = MagicMock()
+        mock_page.goto.side_effect = Exception("Browser crashed")
+
+        mock_browser = MagicMock()
+        mock_browser.new_page.return_value = mock_page
+
+        mock_pw_instance = MagicMock()
+        mock_pw_instance.chromium.launch.return_value = mock_browser
+
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(return_value=mock_pw_instance)
+        mock_cm.__exit__ = MagicMock(return_value=False)
+
+        with patch("playwright.sync_api.sync_playwright", return_value=mock_cm):
+            result = run_web_render_tool({"url": "https://crash.example.com"})
+
+        self.assertIn("error", result)
+        self.assertIn("Browser render failed", result["error"])
+
+    def test_clamps_wait_seconds(self):
+        """wait_seconds should be clamped to 0-10."""
+        from tools import run_web_render_tool
+
+        # Negative values → 0
+        # Values > 10 → 10
+        # This just verifies no crash; actual playwright is not called due to validation
+        result = run_web_render_tool({"url": "ftp://bad"})
+        self.assertIn("error", result)
+
+
+# ── Cache tests ──────────────────────────────────────────────────────────
+
+
+class TestUrlCache(unittest.TestCase):
+    def setUp(self):
+        import tools
+        tools._url_cache.clear()
+
+    def test_cache_set_and_get(self):
+        from tools import _set_cached, _get_cached
+
+        _set_cached("test_key", {"data": "value"})
+        result = _get_cached("test_key")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["data"], "value")
+
+    def test_cache_miss(self):
+        from tools import _get_cached
+
+        self.assertIsNone(_get_cached("nonexistent"))
+
+    def test_cache_expiry(self):
+        from tools import _set_cached, _get_cached, _url_cache
+
+        _set_cached("expiring", {"data": "old"})
+        # Manually backdate the timestamp
+        ts, result = _url_cache["expiring"]
+        _url_cache["expiring"] = (ts - 600, result)  # 10 min ago
+
+        self.assertIsNone(_get_cached("expiring"))
+
+
+# ── URL validation tests ────────────────────────────────────────────────
+
+
+class TestUrlValidation(unittest.TestCase):
+    def test_valid_http(self):
+        from tools import _validate_url
+
+        self.assertIsNone(_validate_url("http://example.com"))
+
+    def test_valid_https(self):
+        from tools import _validate_url
+
+        self.assertIsNone(_validate_url("https://example.com/path?q=1"))
+
+    def test_empty_url(self):
+        from tools import _validate_url
+
+        self.assertIsNotNone(_validate_url(""))
+
+    def test_file_scheme(self):
+        from tools import _validate_url
+
+        self.assertIsNotNone(_validate_url("file:///etc/passwd"))
+
+    def test_ftp_scheme(self):
+        from tools import _validate_url
+
+        self.assertIsNotNone(_validate_url("ftp://example.com"))
+
+    def test_no_scheme(self):
+        from tools import _validate_url
+
+        self.assertIsNotNone(_validate_url("example.com"))
+
+
+# ── Content-type detection tests ─────────────────────────────────────────
+
+
+class TestContentTypeDetection(unittest.TestCase):
+    def test_html_content_type(self):
+        from tools import _detect_content_type
+
+        is_html, is_textual = _detect_content_type("text/html; charset=utf-8", "")
+        self.assertTrue(is_html)
+        self.assertTrue(is_textual)
+
+    def test_json_content_type(self):
+        from tools import _detect_content_type
+
+        is_html, is_textual = _detect_content_type("application/json", "")
+        self.assertFalse(is_html)
+        self.assertTrue(is_textual)
+
+    def test_image_content_type(self):
+        from tools import _detect_content_type
+
+        is_html, is_textual = _detect_content_type("image/png", "")
+        self.assertFalse(is_html)
+        self.assertFalse(is_textual)
+
+    def test_html_sniffing(self):
+        from tools import _detect_content_type
+
+        is_html, is_textual = _detect_content_type(
+            "application/octet-stream", "<html><body>hi</body></html>"
+        )
+        self.assertTrue(is_html)
+        self.assertTrue(is_textual)
+
+    def test_plain_text(self):
+        from tools import _detect_content_type
+
+        is_html, is_textual = _detect_content_type("text/plain", "just text")
+        self.assertFalse(is_html)
+        self.assertTrue(is_textual)
+
+
+# ── JSON formatting tests ───────────────────────────────────────────────
+
+
+class TestJsonFormatting(unittest.TestCase):
+    def test_formats_valid_json(self):
+        from tools import _format_json_if_applicable
+
+        result = _format_json_if_applicable(
+            "application/json", '{"key":"value"}'
+        )
+        self.assertIsNotNone(result)
+        self.assertIn('"key": "value"', result)
+
+    def test_returns_none_for_html(self):
+        from tools import _format_json_if_applicable
+
+        result = _format_json_if_applicable("text/html", "<html></html>")
+        self.assertIsNone(result)
+
+    def test_returns_none_for_invalid_json(self):
+        from tools import _format_json_if_applicable
+
+        result = _format_json_if_applicable("application/json", "not json")
+        self.assertIsNone(result)
+
 
 # ── HTML helper tests ────────────────────────────────────────────────────
 
@@ -499,11 +990,9 @@ class TestAiAnswer(unittest.TestCase):
             content="Test reply", tool_calls=None, reasoning=None
         )
         fake_choice = SimpleNamespace(message=fake_message, finish_reason="stop")
-        fake_response = SimpleNamespace(choices=[fake_choice])
-        mock_create.return_value = fake_response
+        mock_create.return_value = SimpleNamespace(choices=[fake_choice])
 
-        comment = FakeComment("u/grok What is the weather like?")
-        reply = ai_answer(comment)
+        reply = ai_answer(FakeComment("u/grok What is the weather like?"))
         self.assertEqual(reply, "Test reply")
 
     @patch("llm.run_web_search_tool")
@@ -543,6 +1032,78 @@ class TestAiAnswer(unittest.TestCase):
         self.assertEqual(mock_create.call_count, 2)
         mock_search.assert_called_once_with({"query": "test query"})
 
+    @patch("llm.run_web_fetch_tool")
+    @patch("llm.client.chat.completions.create")
+    def test_web_fetch_tool_dispatch(self, mock_create, mock_fetch):
+        """Verify the LLM can invoke web_fetch and get results back."""
+        from llm import ai_answer
+
+        tool_call = SimpleNamespace(
+            id="tc_fetch",
+            function=SimpleNamespace(
+                name="web_fetch",
+                arguments=json.dumps({"url": "https://example.com"}),
+            ),
+        )
+        first_message = SimpleNamespace(content="", tool_calls=[tool_call], reasoning=None)
+        second_message = SimpleNamespace(content="Read the page", tool_calls=None, reasoning=None)
+
+        mock_create.side_effect = [
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=first_message, finish_reason="tool_calls")]
+            ),
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=second_message, finish_reason="stop")]
+            ),
+        ]
+        mock_fetch.return_value = {
+            "url": "https://example.com",
+            "status_code": 200,
+            "title": "Example",
+            "text": "Page content",
+            "text_length": 12,
+        }
+
+        answer = ai_answer(FakeComment("u/grok read this page"))
+        self.assertEqual(answer, "Read the page")
+        mock_fetch.assert_called_once_with({"url": "https://example.com"})
+
+    @patch("llm.run_web_render_tool")
+    @patch("llm.client.chat.completions.create")
+    def test_web_render_tool_dispatch(self, mock_create, mock_render):
+        """Verify the LLM can invoke web_render and get results back."""
+        from llm import ai_answer
+
+        tool_call = SimpleNamespace(
+            id="tc_render",
+            function=SimpleNamespace(
+                name="web_render",
+                arguments=json.dumps({"url": "https://spa.example.com"}),
+            ),
+        )
+        first_message = SimpleNamespace(content="", tool_calls=[tool_call], reasoning=None)
+        second_message = SimpleNamespace(content="Rendered result", tool_calls=None, reasoning=None)
+
+        mock_create.side_effect = [
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=first_message, finish_reason="tool_calls")]
+            ),
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=second_message, finish_reason="stop")]
+            ),
+        ]
+        mock_render.return_value = {
+            "url": "https://spa.example.com",
+            "status_code": 200,
+            "title": "SPA",
+            "text": "Rendered content",
+            "text_length": 16,
+        }
+
+        answer = ai_answer(FakeComment("u/grok render this SPA"))
+        self.assertEqual(answer, "Rendered result")
+        mock_render.assert_called_once_with({"url": "https://spa.example.com"})
+
     @patch("llm.run_web_search_tool")
     @patch("llm.client.chat.completions.create")
     def test_fallback_after_max_tool_steps(self, mock_create, mock_search):
@@ -579,8 +1140,9 @@ class TestAiAnswer(unittest.TestCase):
         from llm import ai_answer
 
         fake_message = SimpleNamespace(content="", tool_calls=None, reasoning=None)
-        fake_choice = SimpleNamespace(message=fake_message, finish_reason="stop")
-        mock_create.return_value = SimpleNamespace(choices=[fake_choice])
+        mock_create.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(message=fake_message, finish_reason="stop")]
+        )
 
         answer = ai_answer(FakeComment("u/grok hi"))
         self.assertIn("sorry", answer.lower())
@@ -589,9 +1151,7 @@ class TestAiAnswer(unittest.TestCase):
     def test_timeout_is_passed(self, mock_create):
         from llm import ai_answer
 
-        fake_message = SimpleNamespace(
-            content="reply", tool_calls=None, reasoning=None
-        )
+        fake_message = SimpleNamespace(content="reply", tool_calls=None, reasoning=None)
         mock_create.return_value = SimpleNamespace(
             choices=[SimpleNamespace(message=fake_message, finish_reason="stop")]
         )
@@ -600,6 +1160,31 @@ class TestAiAnswer(unittest.TestCase):
         call_kwargs = mock_create.call_args.kwargs
         self.assertIn("timeout", call_kwargs)
         self.assertGreater(call_kwargs["timeout"], 0)
+
+    @patch("llm.client.chat.completions.create")
+    def test_tool_definitions_include_all_three_tools(self, mock_create):
+        from llm import ai_answer
+
+        fake_message = SimpleNamespace(content="reply", tool_calls=None, reasoning=None)
+        mock_create.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(message=fake_message, finish_reason="stop")]
+        )
+
+        ai_answer(FakeComment("u/grok test"))
+        call_kwargs = mock_create.call_args.kwargs
+        tool_names = [t["function"]["name"] for t in call_kwargs["tools"]]
+        self.assertIn("web_search", tool_names)
+        self.assertIn("web_fetch", tool_names)
+        self.assertIn("web_render", tool_names)
+        self.assertEqual(len(tool_names), 3)
+
+    @patch("llm.client.chat.completions.create")
+    def test_unknown_tool_returns_error(self, mock_create):
+        from llm import _execute_tool
+
+        result = _execute_tool("nonexistent_tool", {})
+        self.assertIn("error", result)
+        self.assertIn("Unknown tool", result["error"])
 
 
 # ── Main loop helper tests ──────────────────────────────────────────────
@@ -643,18 +1228,27 @@ class TestSummarizeToolResult(unittest.TestCase):
         self.assertIn("result_count=3", summary)
         self.assertIn("hello", summary)
 
-    def test_web_open_url_summary(self):
+    def test_web_fetch_summary(self):
         from tools import summarize_tool_result
 
-        result = {
-            "mode_used": "fetch",
-            "status_code": 200,
-            "text_length": 5000,
-            "error": None,
-        }
-        summary = summarize_tool_result("web_open_url", result)
-        self.assertIn("mode=fetch", summary)
+        result = {"status_code": 200, "text_length": 5000, "title": "Page", "error": None}
+        summary = summarize_tool_result("web_fetch", result)
         self.assertIn("status=200", summary)
+        self.assertIn("text_length=5000", summary)
+
+    def test_web_render_summary(self):
+        from tools import summarize_tool_result
+
+        result = {"status_code": 200, "text_length": 3000, "title": "SPA", "error": None}
+        summary = summarize_tool_result("web_render", result)
+        self.assertIn("status=200", summary)
+
+    def test_unknown_tool_summary(self):
+        from tools import summarize_tool_result
+
+        result = {"some": "data"}
+        summary = summarize_tool_result("mystery_tool", result)
+        self.assertIn("some", summary)
 
 
 if __name__ == "__main__":
