@@ -12,11 +12,10 @@ from config import (
     MODEL,
     MAX_TOOL_STEPS,
     OPENROUTER_TIMEOUT,
-    PROMPT_HEADER_TEMPLATE,
-    SYSTEM_PROMPT_TEMPLATE,
     TRIGGER,
     client,
 )
+from prompt_templates import PROMPT_HEADER_TEMPLATE, SYSTEM_PROMPT_TEMPLATE
 from tools import (
     run_web_fetch_tool,
     run_web_render_tool,

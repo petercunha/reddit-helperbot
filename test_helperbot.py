@@ -91,6 +91,31 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(set(config.REQUIRED_ENV_VARS), expected)
 
 
+class TestPromptTemplates(unittest.TestCase):
+    def test_system_prompt_template_has_required_placeholders(self):
+        import prompt_templates
+
+        self.assertIn("{local_stamp}", prompt_templates.SYSTEM_PROMPT_TEMPLATE)
+        self.assertIn("{utc_stamp}", prompt_templates.SYSTEM_PROMPT_TEMPLATE)
+
+
+# ── AI responder tests ───────────────────────────────────────────────────
+
+
+class TestAiResponder(unittest.TestCase):
+    @patch("ai_responder.ai_answer")
+    def test_build_reply_text_appends_model_attribution(self, mock_ai_answer):
+        import config
+        from ai_responder import build_reply_text
+
+        mock_ai_answer.return_value = "Base answer"
+
+        reply_text = build_reply_text(FakeComment("u/grok hello"))
+        self.assertIn("Base answer", reply_text)
+        self.assertIn(config.MODEL, reply_text)
+        mock_ai_answer.assert_called_once()
+
+
 # ── Trigger regex tests ─────────────────────────────────────────────────
 
 
@@ -1209,7 +1234,7 @@ class TestAiAnswer(unittest.TestCase):
 
 class TestMainHelpers(unittest.TestCase):
     def test_reply_with_retry_succeeds_first_try(self):
-        from main import _reply_with_retry
+        from reddit_listener import _reply_with_retry
 
         comment = FakeComment("test")
         comment.reply = MagicMock()
@@ -1217,7 +1242,7 @@ class TestMainHelpers(unittest.TestCase):
         comment.reply.assert_called_once_with("hello")
 
     def test_reply_with_retry_retries_on_failure(self):
-        from main import _reply_with_retry
+        from reddit_listener import _reply_with_retry
 
         comment = FakeComment("test")
         comment.reply = MagicMock(side_effect=[Exception("fail"), None])
@@ -1225,7 +1250,7 @@ class TestMainHelpers(unittest.TestCase):
         self.assertEqual(comment.reply.call_count, 2)
 
     def test_reply_with_retry_raises_after_exhaustion(self):
-        from main import _reply_with_retry
+        from reddit_listener import _reply_with_retry
 
         comment = FakeComment("test")
         comment.reply = MagicMock(side_effect=Exception("permanent failure"))

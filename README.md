@@ -11,7 +11,7 @@ Summon bot on Reddit by starting your message with @grok
 - Fetches the entire conversation context (submission + ancestor comments), including images.
 - Uses OpenRouter to connect to various Large Language Models (LLMs).
 - Exposes a model tool (`web_search`) backed by your own SearXNG instance (instead of OpenRouter's paid web plugin).
-- Exposes a model tool (`web_open_url`) to fetch and extract readable content from URLs, with optional rendered fallback.
+- Exposes model tools (`web_fetch` and `web_render`) to read URLs with fast fetch-first behavior and optional rendered fallback.
 - Posts the LLM's generated reply back to the comment.
 - Configurable settings for trigger words, target subreddits, and rate limiting.
 - Structured logging via Python's `logging` module.
@@ -27,12 +27,17 @@ Summon bot on Reddit by starting your message with @grok
 
 ```
 reddit-helperbot/
-├── main.py              # Entry point: main loop, signal handling, stats
+├── main.py              # Entry point: wiring, env validation, signal setup
+├── reddit_listener.py   # Reddit comment stream listener and retry logic
+├── ai_responder.py      # AI reply composition for Reddit comments
 ├── config.py            # Configuration, env validation, client init
 ├── llm.py               # LLM interaction and tool-calling loop
+├── prompt_templates.py  # Prompt template loader
+├── prompts/
+│   └── system_prompt.txt # Editable system prompt template
 ├── tools.py             # Web search (SearXNG) and URL fetching tools
 ├── transcript.py        # Reddit thread transcript and image extraction
-├── test_helperbot.py    # Unit tests (51 tests)
+├── test_helperbot.py    # Unit tests
 ├── requirements.txt     # Pinned dependencies
 ├── Dockerfile           # Container setup (Python 3.12)
 ├── .env.example         # Template for secrets
@@ -142,6 +147,8 @@ You can customize the bot's behavior by editing `config.py`:
 | `MAX_TOOL_STEPS` | `16` | Maximum LLM tool-calling iterations |
 | `MAX_IMAGES_TO_SEND` | `5` | Maximum images included in the prompt |
 | `OPENROUTER_TIMEOUT` | `120` | API call timeout in seconds |
+
+System prompt text is stored in `prompts/system_prompt.txt`.
 
 ## Testing
 
