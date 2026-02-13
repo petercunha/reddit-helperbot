@@ -333,7 +333,7 @@ def ai_answer(trigger_comment: praw.models.Comment) -> str:
             "messages": messages,
             "tools": TOOL_DEFINITIONS,
             "tool_choice": "auto",
-            "parallel_tool_calls": False,
+            "parallel_tool_calls": True,
             "timeout": OPENROUTER_TIMEOUT,
             "extra_body": {
                 "reasoning": {
