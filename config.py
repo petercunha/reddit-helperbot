@@ -16,6 +16,11 @@ from openai import OpenAI
 import praw
 import urllib3
 
+# ── Model ──────────────────────────────────────────────────────────────
+MODEL = "z-ai/glm-5"
+# MODEL = "moonshotai/kimi-k2.5"
+
+
 # ── Logging ──────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -60,9 +65,6 @@ client = OpenAI(
         "X-Title": "helperbot",
     },
 )
-
-MODEL = "moonshotai/kimi-k2.5"
-# MODEL = "openrouter/free"
 
 # ── SearXNG / web-tool settings ──────────────────────────────────────────
 SEARXNG_BASE_URL = os.getenv("SEARXNG_BASE_URL", "https://seedbox.local/searxng").strip().rstrip("/")
