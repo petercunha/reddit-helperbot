@@ -17,8 +17,8 @@ import praw
 import urllib3
 
 # ── Model ──────────────────────────────────────────────────────────────
-MODEL = "z-ai/glm-5"
-# MODEL = "moonshotai/kimi-k2.5"
+# MODEL = "z-ai/glm-5"
+MODEL = "moonshotai/kimi-k2.5"
 
 
 # ── Logging ──────────────────────────────────────────────────────────────
