@@ -526,19 +526,29 @@ def run_web_render_tool(arguments: dict[str, Any]) -> dict[str, Any]:
             "error": "playwright is not installed. Run: pip install playwright && playwright install chromium",
         }
 
+    html = ""
+    final_url = url
+    status_code = None
+    
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)
-            page = browser.new_page(user_agent=URL_TOOL_USER_AGENT)
-            response = page.goto(url, wait_until="networkidle", timeout=30_000)
+            try:
+                page = browser.new_page(user_agent=URL_TOOL_USER_AGENT)
+                response = page.goto(url, wait_until="networkidle", timeout=30_000)
 
-            if wait_seconds > 0:
-                page.wait_for_timeout(int(wait_seconds * 1000))
+                if wait_seconds > 0:
+                    page.wait_for_timeout(int(wait_seconds * 1000))
 
-            html = page.content()
-            final_url = page.url
-            status_code = response.status if response is not None else None
-            browser.close()
+                html = page.content()
+                final_url = page.url
+                status_code = response.status if response is not None else None
+            finally:
+                # Always close browser to prevent zombie processes
+                try:
+                    browser.close()
+                except Exception:
+                    pass
     except Exception as exc:
         return {"url": url, "error": f"Browser render failed: {exc}"}
 
